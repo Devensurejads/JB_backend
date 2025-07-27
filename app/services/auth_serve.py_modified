@@ -1,0 +1,242 @@
+# app/services/auth_service.py
+
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, Optional, Tuple
+from marshmallow import Schema, fields, validate, ValidationError
+
+from app.utils.db_abstraction import db
+from app.utils.password_utils import verify_password, is_valid_hash
+from app.utils.auth import generate_token
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+class LoginSchema(Schema):
+    """Schema for user login."""
+    username = fields.Str(required=True, validate=validate.Length(min=1, max=50))
+    password = fields.Str(required=True, validate=validate.Length(min=1, max=128))
+
+def get_current_timestamp():
+    """Get current timestamp as string for database storage."""
+    return datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+class AuthService:
+    """
+    Service class for handling authentication and user management operations.
+    Provides business logic for user registration, login, profile management,
+    and password operations with proper validation and audit logging.
+    """
+    @staticmethod
+    def login(credentials: Dict, ip_address: str = None) -> Tuple[bool, str, Optional[Dict]]:
+        """
+        Authenticate user and return JWT token.
+        
+        Args:
+            credentials (Dict): Login credentials
+            ip_address (str): IP address for audit logging
+            
+        Returns:
+            Tuple[bool, str, Optional[Dict]]: (success, message, auth_data)
+        """
+        try:
+            # Validate input
+            login_schema = LoginSchema()
+            try:
+                validated_data = login_schema.load(credentials)
+            except ValidationError as e:
+                logger.warning(f"Login validation error: {e.messages}")
+                return False, f"Validation error: {e.messages}", None
+            
+            username = validated_data['username']
+            password = validated_data['password']
+            
+            # Get user from database
+            user = db.select(
+                'users', 
+                condition='username = ? AND is_active = ?', 
+                params=[username, True]
+            )
+            
+            if not user:
+                logger.warning(f"Login attempt with invalid username: {username}")
+                # Don't reveal whether username exists
+                return False, "Invalid username or password", None
+            
+            user_data = user[0]
+            stored_hash = user_data.get('password_hash')
+            
+            if not stored_hash:
+                logger.error(f"No password hash found for user: {username}")
+                return False, "Authentication failed", None
+            
+            # Validate hash format
+            if not is_valid_hash(stored_hash):
+                logger.error(f"Invalid hash format for user: {username}")
+                return False, "Authentication failed", None
+            
+            # Verify password
+            if not verify_password(password, stored_hash):
+                logger.warning(f"Invalid password for user: {username}")
+                # Log failed login attempt
+                db.log_audit(
+                    user_id=user_data.get('id'),
+                    action='LOGIN_FAILED',
+                    entity_type='user',
+                    entity_id=user_data.get('id'),
+                    changes={'reason': 'invalid_password'},
+                    ip_address=ip_address
+                )
+                return False, "Invalid username or password", None
+            
+            # Update last login
+            db.update(
+                'users',
+                {'last_login': datetime.utcnow().isoformat()},
+                'id = ?',
+                [user_data.get('id')]
+            )
+            
+            # Generate JWT token
+            try:
+                token = generate_token(user_data)
+            except Exception as e:
+                logger.error(f"Token generation failed: {str(e)}")
+                return False, "Authentication failed", None
+            
+            # Log successful login
+            db.log_audit(
+                user_id=user_data.get('id'),
+                action='LOGIN',
+                entity_type='user',
+                entity_id=user_data.get('id'),
+                changes={'login_time': datetime.utcnow().isoformat()},
+                ip_address=ip_address
+            )
+            
+            # Prepare response data
+            auth_data = {
+                'token': token,
+                'user': {
+                    'id': user_data.get('id'),
+                    'username': user_data.get('username'),
+                    'email': user_data.get('email'),
+                    'first_name': user_data.get('first_name'),
+                    'last_name': user_data.get('last_name'),
+                    'role': user_data.get('role')
+                }
+            }
+            
+            logger.info(f"Successful login for user: {username}")
+            return True, "Login successful", auth_data
+            
+        except Exception as e:
+            logger.error(f"Login error: {str(e)}")
+            return False, "Authentication failed", None
+    
+    @staticmethod
+    def logout(user_id: int, ip_address: str = None) -> Tuple[bool, str]:
+        """
+        Logout user (mainly for audit logging).
+        
+        Args:
+            user_id (int): User ID
+            ip_address (str): IP address for audit logging
+            
+        Returns:
+            Tuple[bool, str]: (success, message)
+        """
+        try:
+            # Log logout
+            db.log_audit(
+                user_id=user_id,
+                action='LOGOUT',
+                entity_type='user',
+                entity_id=user_id,
+                changes={'logout_time': datetime.utcnow().isoformat()},
+                ip_address=ip_address
+            )
+            
+            logger.info(f"User logged out: {user_id}")
+            return True, "Logout successful"
+            
+        except Exception as e:
+            logger.error(f"Logout error: {str(e)}")
+            return False, "Logout failed"
+    
+    @staticmethod
+    def change_password(user_id: int, old_password: str, new_password: str, ip_address: str = None) -> Tuple[bool, str]:
+        """
+        Change user password.
+        
+        Args:
+            user_id (int): User ID
+            old_password (str): Current password
+            new_password (str): New password
+            ip_address (str): IP address for audit logging
+            
+        Returns:
+            Tuple[bool, str]: (success, message)
+        """
+        try:
+            # Validate new password length
+            if len(new_password) < 8:
+                return False, "New password must be at least 8 characters long"
+            
+            # Get user data
+            user = db.get_by_id('users', user_id)
+            if not user:
+                return False, "User not found"
+            
+            stored_hash = user.get('password_hash')
+            if not stored_hash or not is_valid_hash(stored_hash):
+                return False, "Current password verification failed"
+            
+            # Verify old password
+            if not verify_password(old_password, stored_hash):
+                logger.warning(f"Invalid old password for user: {user_id}")
+                return False, "Current password is incorrect"
+            
+            # Hash new password
+            from app.utils.password_utils import hash_password
+            try:
+                new_password_hash = hash_password(new_password)
+            except Exception as e:
+                logger.error(f"Password hashing failed: {str(e)}")
+                return False, "Password update failed"
+            
+            # Update password
+            success = db.update(
+                'users',
+                {
+                    'password_hash': new_password_hash,
+                    'updated_at': datetime.utcnow().isoformat()
+                },
+                'id = ?',
+                [user_id]
+            )
+            
+            if not success:
+                return False, "Password update failed"
+            
+            # Log password change
+            db.log_audit(
+                user_id=user_id,
+                action='PASSWORD_CHANGE',
+                entity_type='user',
+                entity_id=user_id,
+                changes={'password_changed': True},
+                ip_address=ip_address
+            )
+            
+            logger.info(f"Password changed for user: {user_id}")
+            return True, "Password changed successfully"
+            
+        except Exception as e:
+            logger.error(f"Password change error: {str(e)}")
+            return False, "Password change failed"
+
+
+# Service instance for easy import
+auth_service = AuthService()
