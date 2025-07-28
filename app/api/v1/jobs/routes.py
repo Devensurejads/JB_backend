@@ -9,6 +9,9 @@ from app.utils.db_abstraction import db
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import os
+import json
+from flask import request, jsonify, g, current_app  # ✅ make sure current_app is imported!
+import jwt
 
 
 from app.services.jobs_service import JobsService
@@ -85,50 +88,133 @@ def handle_general_error(error):
 @jobs_bp.route('/', methods=['POST'])
 @employer_or_admin_required
 def create_job():
-    """Create a new job posting."""
+    """Create a new job posting with optional company logo upload."""
     try:
-        data = request.get_json()
+        # 📌 Detect if it’s a multipart request (file upload)
+        if request.content_type and 'multipart/form-data' in request.content_type:
+            data = request.form.to_dict()
+
+            # ✅ Convert JSON string fields to actual lists/dicts
+            json_fields = ['skills', 'required_skills', 'preferred_skills', 'languages', 'questions']
+            for field in json_fields:
+                if field in data and isinstance(data[field], str):
+                    try:
+                        data[field] = json.loads(data[field])
+                    except Exception:
+                        return jsonify({'error': f'Invalid JSON for {field}'}), 400
+
+            # ✅ Convert booleans
+            boolean_fields = ['is_remote', 'show_salary', 'is_featured', 'is_urgent',
+                              'auto_close_after_deadline', 'is_approved', 'is_active']
+            for field in boolean_fields:
+                if field in data:
+                    data[field] = data[field].lower() in ('true', '1', 'yes', 'on')
+
+            # ✅ Convert numerics
+            numeric_fields = ['category_id', 'salary_min', 'salary_max', 'max_applications']
+            for field in numeric_fields:
+                if field in data and data[field]:
+                    try:
+                        if field in ['salary_min', 'salary_max']:
+                            data[field] = float(data[field])
+                        else:
+                            data[field] = int(data[field])
+                    except ValueError:
+                        return jsonify({'error': f'Invalid value for {field}'}), 400
+
+        else:
+            # 📌 JSON body fallback
+            data = request.get_json()
+
         if not data:
             return jsonify({'error': 'No data provided'}), 400
-        
+
+        # ✅ Current user & employer ID
         user = g.current_user
         user_id = user['user_id']
-        print(user_id)
-        
-        # Get employer_id - for employers, get their employer record
+
         if user['role'] == 'employer':
-            # Get employer record for the user
             from app.utils.db_abstraction import db
             employer_record = db.select('employers', ['id'], 'user_id = ? AND is_active = 1', [user_id])
-
             if not employer_record:
                 return jsonify({'error': 'Employer profile not found'}), 400
             employer_id = list(employer_record)[0]['id']
         else:
-            # Admin can specify employer_id or it must be provided
             employer_id = data.get('employer_id')
             if not employer_id:
                 return jsonify({'error': 'employer_id is required for admin users'}), 400
-        
+
         data.pop('employer_id', None)
-        # Create the job
+
+        # ✅ Handle company logo upload
+        company_logo_data = {}
+        if 'company_logo' in request.files:
+            company_logo = request.files['company_logo']
+            if company_logo.filename != '':
+                if company_logo and allowed_file(company_logo.filename):
+                    upload_folder = 'uploads/company_logos'
+                    if not os.path.exists(upload_folder):
+                        os.makedirs(upload_folder)
+
+                    filename = secure_filename(company_logo.filename)
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    name, ext = os.path.splitext(filename)
+                    filename = f"{name}_{timestamp}{ext}"
+
+                    logo_path = os.path.join(upload_folder, filename)
+                    company_logo.save(logo_path)
+
+                    company_logo_data = {
+                        'company_logo_filename': filename,
+                        'company_logo_path': logo_path,
+                        'company_logo_size': os.path.getsize(logo_path),
+                        'company_logo_uploaded_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                else:
+                    return jsonify({'error': 'Invalid company logo file format'}), 400
+
+        # ✅ Call the service
         job = JobsService.create_job(
             employer_id=employer_id,
             job_data=data,
             user_id=user_id,
             ip_address=get_client_ip()
         )
-        
-        return jsonify({
-            'message': 'Job created successfully',
-            'job': job
-        }), 201
-        
+
+        # ✅ If logo: update DB
+        if company_logo_data:
+            from app.utils.db_abstraction import db
+            job_id = job['id'] if isinstance(job, dict) else job.id
+            db.update('jobs', company_logo_data, 'id = ?', [job_id])
+
+            # Attach logo data to response
+            if isinstance(job, dict):
+                job.update(company_logo_data)
+                job['company_logo'] = {
+                    'filename': company_logo_data['company_logo_filename'],
+                    'path': company_logo_data['company_logo_path'],
+                    'size': company_logo_data['company_logo_size'],
+                    'uploaded_at': company_logo_data['company_logo_uploaded_at']
+                }
+            else:
+                for k, v in company_logo_data.items():
+                    setattr(job, k, v)
+                job.company_logo = {
+                    'filename': company_logo_data['company_logo_filename'],
+                    'path': company_logo_data['company_logo_path'],
+                    'size': company_logo_data['company_logo_size'],
+                    'uploaded_at': company_logo_data['company_logo_uploaded_at']
+                }
+        else:
+            if isinstance(job, dict):
+                job['company_logo'] = None
+            else:
+                job.company_logo = None
+
+        return jsonify({'message': 'Job created successfully', 'job': job}), 201
+
     except ValidationError as e:
-        return jsonify({
-            'error': 'Validation failed',
-            'details': e.messages
-        }), 400
+        return jsonify({'error': 'Validation failed', 'details': e.messages}), 400
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
@@ -259,7 +345,7 @@ def delete_job(job_id):
 
 @jobs_bp.route('/', methods=['GET'])
 def get_jobs():
-    """Get a paginated list of jobs with filtering."""
+    """Get a paginated list of jobs with filtering, plus saved flag if user is logged in."""
     try:
         # Get filter parameters from query string
         filters = dict(request.args)
@@ -305,15 +391,48 @@ def get_jobs():
                     filters[param] = Decimal(filters[param])
                 except (ValueError, TypeError):
                     return jsonify({'error': f'Invalid decimal value for {param}'}), 400
+
+        # ✅ Get current user if authenticated
         
-        # Get jobs list
+        auth_header = request.headers.get('Authorization', None)
+        g.current_user = None
+
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
+            try:
+                payload = jwt.decode(
+                    token,
+                    current_app.config['JWT_SECRET_KEY'],
+                    algorithms=['HS256']
+                )
+                g.current_user = payload
+            except jwt.ExpiredSignatureError:
+                g.current_user = None
+            except jwt.InvalidTokenError:
+                g.current_user = None
+
+        user_id = None
+        if hasattr(g, 'current_user') and g.current_user:
+            user_id = g.current_user.get('user_id')
+        # ✅ Get jobs
         jobs, total_count = JobsService.get_jobs_list(filters)
-        
+
+        # ✅ If logged in, get saved jobs for this user
+        saved_job_ids = []
+        if user_id:
+            rows = db.select('saved_jobs', ['job_id'], 'user_id = ?', [user_id])
+            print(rows)
+            saved_job_ids = [row['job_id'] for row in rows]
+
+        # ✅ Add saved flag to each job
+        for job in jobs:
+            job['saved'] = job['id'] in saved_job_ids
+
         # Calculate pagination info
         page = filters.get('page', 1)
         per_page = filters.get('per_page', 20)
         total_pages = (total_count + per_page - 1) // per_page
-        
+
         return jsonify({
             'jobs': jobs,
             'pagination': {
@@ -325,7 +444,7 @@ def get_jobs():
                 'has_prev': page > 1
             }
         })
-        
+
     except ValidationError as e:
         return jsonify({
             'error': 'Invalid filter parameters',
@@ -336,6 +455,7 @@ def get_jobs():
         return jsonify({'error': 'Failed to retrieve jobs'}), 500
 
 
+
 @jobs_bp.route('/employer/<int:employer_id>', methods=['GET'])
 @login_required
 def get_employer_jobs(employer_id):
@@ -343,6 +463,7 @@ def get_employer_jobs(employer_id):
     try:
         # Check authorization - employers can only see their own jobs
         user = g.current_user
+        print(user)
         if user['role'] == 'employer':
             from app.utils.db_abstraction import db
             employer_record = db.select('employers', ['id'], 'user_id = ? AND is_active = 1', [user['user_id']])
@@ -690,7 +811,7 @@ def reject_job(job_id):
 
 
 # Function to check allowed file extensions
-ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx'}  
+ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png'}  
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -734,9 +855,9 @@ def apply_job():
         if job['status'] != 'active':
             return jsonify({'error': 'Job is no longer active'}), 400
         
-        if job['applications_count'] >= job['max_applications']:
+        if job['max_applications'] is not None and job['applications_count'] >= job['max_applications']:
             return jsonify({'error': 'Maximum applications reached for this job'}), 400
-        
+
         if job['application_deadline'] and datetime.now() > datetime.strptime(job['application_deadline'], '%Y-%m-%d'):
             return jsonify({'error': 'The application deadline has passed'}), 400
         
@@ -828,8 +949,40 @@ def list_job_applications():
         
 
         if role == 'employee':
+            # 1. Get applications by this user
             applications = db.select('job_applications', '*', 'user_id = ?', [user_id])
-            print(applications)
+            
+            # 2. For each application, get the related job details
+            applications_with_jobs = []
+            for app in applications:
+                job = db.select(
+                    'jobs',
+                    [
+                        'id',
+                        'title',
+                        'description',
+                        'company_name',
+                        'company_logo_path',
+                        'posted_at',
+                        'remote_type',
+                        'salary_min',
+                        'salary_max',
+                        'employment_type',
+                        'location'
+                    ],
+                    'id = ?',
+                    [app['job_id']]
+                )
+                job_data = job[0] if job else None
+
+                # 3. Attach job details to application
+                applications_with_jobs.append({
+                    **app,
+                    'job': job_data
+                })
+
+            applications = applications_with_jobs  # overwrite with enriched data
+
         elif role in ['employer']:
             employer = db.select('employers', ['id'], 'user_id = ?', [user_id])
             if not employer:
@@ -846,7 +999,7 @@ def list_job_applications():
             applications = db.select('job_applications', '*', query, job_ids)
         else:
             return jsonify({'error': 'Unauthorized'}), 403
-        return jsonify(applications)
+        return jsonify({'jobs': applications})
     
     except Exception as e:
         logger.error(f"Error fetching job applications: {str(e)}")
@@ -941,17 +1094,25 @@ def get_saved_jobs(user_id):
         saved_jobs_with_details = []
         for saved_job in saved_jobs:
             # Get job details like title and description for each saved job
-            job = db.select('jobs', ['id', 'title', 'description'], 'id = ?', [saved_job['job_id']])
+            job = db.select('jobs', ['id', 'title', 'description', 'company_name', 'company_logo_path', 'posted_at', 'remote_type', 'salary_max', 'salary_min', 'employment_type'], 'id = ?', [saved_job['job_id']])
+            print(job)
+            print(saved_job)
             if job:
                 saved_jobs_with_details.append({
                     'saved_job_id': saved_job['id'],
                     'job_id': job[0]['id'],
                     'title': job[0]['title'],
                     'description': job[0]['description'],
+                    'company_name': job[0]['company_name'],
+                    'company_logo_path': job[0]['company_logo_path'],
+                    'posted_at': job[0]['posted_at'],
+                    'remote_type': job[0]['remote_type'],
+                    'salary_max': job[0]['salary_max'],
+                    'salary_min': job[0]['salary_min'],
+                    'employment_type': job[0]['employment_type'],
                     'saved_at': saved_job['created_at']
                 })
-
-        return jsonify(saved_jobs_with_details)
+        return jsonify({'jobs': saved_jobs_with_details})
 
     except Exception as e:
         logger.error(f"Error fetching saved jobs for employee {user_id}: {str(e)}")

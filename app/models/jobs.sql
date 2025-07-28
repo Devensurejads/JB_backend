@@ -24,6 +24,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     requirements TEXT,
     responsibilities TEXT,
     benefits TEXT,
+    department TEXT,
+    company_name TEXT,
+
+    company_logo_filename TEXT,
+    company_logo_path TEXT,
+    company_logo_size INTEGER,
+    company_logo_uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
     
     -- Job Details
     employment_type TEXT NOT NULL, -- 'full-time', 'part-time', 'contract', 'freelance', 'internship'

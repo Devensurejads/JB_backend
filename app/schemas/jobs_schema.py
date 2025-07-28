@@ -551,6 +551,9 @@ class JobListResponseSchema(Schema):
     experience_level = fields.Str()
     location = fields.Str()
     city = fields.Str()
+    department = fields.Str()
+    company_name = fields.Str()
+    responsibilities = fields.Str()
     country = fields.Str()
     is_remote = fields.Bool()
     remote_type = fields.Str()
@@ -567,6 +570,15 @@ class JobListResponseSchema(Schema):
     posted_at = fields.Str(dump_only=True)
     expires_at = fields.Str()
     
+    # Company Logo Fields
+    company_logo_filename = fields.Str(dump_only=True)
+    company_logo_path = fields.Str(dump_only=True)
+    company_logo_size = fields.Int(dump_only=True)
+    company_logo_uploaded_at = fields.Str(dump_only=True)
+    
+    # Computed company_logo object
+    company_logo = fields.Method("get_company_logo", dump_only=True)
+    
     # Employer Information
     employer_company_name = fields.Str(dump_only=True)
     employer_logo_url = fields.Url(dump_only=True)
@@ -576,6 +588,24 @@ class JobListResponseSchema(Schema):
     category_name = fields.Str(dump_only=True)
     
     created_at = fields.Str(dump_only=True)
+    
+    def get_company_logo(self, obj):
+        """Create company_logo object from individual fields."""
+        if hasattr(obj, 'company_logo_filename') and obj.company_logo_filename:
+            return {
+                'filename': obj.company_logo_filename,
+                'path': obj.company_logo_path,
+                'size': obj.company_logo_size,
+                'uploaded_at': obj.company_logo_uploaded_at
+            }
+        elif isinstance(obj, dict) and obj.get('company_logo_filename'):
+            return {
+                'filename': obj.get('company_logo_filename'),
+                'path': obj.get('company_logo_path'),
+                'size': obj.get('company_logo_size'),
+                'uploaded_at': obj.get('company_logo_uploaded_at')
+            }
+        return None
 
 
 class JobStatsSchema(Schema):

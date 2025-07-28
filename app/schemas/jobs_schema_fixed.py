@@ -86,7 +86,13 @@ class JobCreateSchema(Schema):
     requirements = fields.Str(validate=validate.Length(max=5000))
     responsibilities = fields.Str(validate=validate.Length(max=5000))
     benefits = fields.Str(validate=validate.Length(max=2000))
-    
+    department = fields.Str(validate=validate.Length(max=255))
+    company_name = fields.Str(validate=validate.Length(max=255))
+    # Add these fields to your job creation schema
+    company_logo_filename = fields.Str(required=False, allow_none=True)
+    company_logo_path = fields.Str(required=False, allow_none=True) 
+    company_logo_size = fields.Int(required=False, allow_none=True)
+    company_logo_uploaded_at = fields.Str(required=False, allow_none=True)
     # Job Details
     employment_type = fields.Str(
         required=True,
