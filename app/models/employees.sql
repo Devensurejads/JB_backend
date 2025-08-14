@@ -2,6 +2,7 @@
 -- Employee Management Tables
 
 -- Employees Table - extends user functionality for employee-specific data
+
 CREATE TABLE IF NOT EXISTS employees (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL UNIQUE,
@@ -24,6 +25,9 @@ CREATE TABLE IF NOT EXISTS employees (
     portfolio_url TEXT,
     linkedin_url TEXT,
     github_url TEXT,
+    profile_url TEXT,
+    qualification TEXT,
+    office_address TEXT,
     
     -- Job Preferences
     preferred_job_type TEXT, -- 'full-time', 'part-time', 'contract', 'freelance', 'internship'

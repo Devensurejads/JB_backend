@@ -3,9 +3,11 @@
 from flask import Blueprint, request, jsonify, g
 import logging
 from marshmallow import ValidationError
+from werkzeug.utils import secure_filename
+import os
 
 from app.utils.auth import (
-    login_required, admin_required, employee_required,
+    login_required, admin_required, employee_required, employer_required,
     get_current_user, can_access_user_data
 )
 from app.services.employee_service import employee_service
@@ -196,6 +198,31 @@ def get_my_profile():
     except Exception as e:
         logger.error(f"Error in get_my_profile endpoint: {str(e)}")
         return create_response(False, "Internal server error", status_code=500)
+    
+    
+@employee_bp.route('/profile/<int:employee_id>', methods=['GET'])
+@employer_required
+def get_employee_profile(employee_id):
+    """
+    Get current employee's profile.
+    ---
+    Accessible by: Employees only.
+    """
+    try:
+        # current_user = get_current_user()
+        # user_id = current_user.get('user_id')
+        
+        # Get employee by user ID
+        success, message, employee_data = employee_service.get_employee_by_user_id(employee_id)
+        
+        if success:
+            return create_response(True, message, employee_data)
+        else:
+            return create_response(False, message, status_code=404 if "not found" in message.lower() else 400)
+    
+    except Exception as e:
+        logger.error(f"Error in get_my_profile endpoint: {str(e)}")
+        return create_response(False, "Internal server error", status_code=500)
 
 
 @employee_bp.route('/<int:employee_id>', methods=['PUT'])
@@ -265,23 +292,51 @@ def update_my_profile():
     try:
         current_user = get_current_user()
         user_id = current_user.get('user_id')
-        
-        # Get request data
-        data = request.get_json()
-        if not data:
+
+        # Collect form data
+        data = request.form.to_dict()
+        resume_file = request.files.get('resume')  # File key must match frontend
+        profile_image = request.files.get('profile_image')
+
+        if not data and not resume_file:
             return create_response(False, "No data provided", status_code=400)
-        
-        # Get employee by user ID to find employee_id
+
+        # If you want to parse comma-separated skills
+        skills = data.get('skills')
+        if isinstance(skills, list):
+            data['skills'] = ', '.join(skills)
+        elif isinstance(skills, str):
+            # Convert string like "Python, Flask" into clean format
+            data['skills'] = ', '.join([s.strip() for s in skills.split(',')])
+
+        # Get employee by user ID
         success, message, employee_data = employee_service.get_employee_by_user_id(user_id)
-        
         if not success:
             return create_response(False, message, status_code=404 if "not found" in message.lower() else 400)
-        
+
         employee_id = employee_data.get('id')
-        
-        # Get IP address for audit logging
+
+        # Get IP for audit log
         ip_address = get_client_ip()
-        
+
+        # Handle resume file upload
+        if resume_file:
+            filename = secure_filename(resume_file.filename)
+            upload_folder = 'uploads/resumes'
+            os.makedirs(upload_folder, exist_ok=True)
+            resume_path = os.path.join(upload_folder, filename)
+            resume_file.save(resume_path)
+            data['resume_url'] = resume_path
+            
+        # Handle profile image upload
+        if profile_image:
+            filename = secure_filename(profile_image.filename)
+            upload_folder = 'uploads/profile_images'
+            os.makedirs(upload_folder, exist_ok=True)
+            profile_image_path = os.path.join(upload_folder, filename)
+            profile_image.save(profile_image_path)
+            data['profile_url'] = profile_image_path
+
         # Update employee
         success, message, updated_data = employee_service.update_employee(
             employee_id=employee_id,
@@ -289,12 +344,12 @@ def update_my_profile():
             current_user_id=current_user.get('user_id'),
             ip_address=ip_address
         )
-        
+
         if success:
             return create_response(True, message, updated_data)
         else:
             return create_response(False, message, status_code=400)
-    
+
     except Exception as e:
         logger.error(f"Error in update_my_profile endpoint: {str(e)}")
         return create_response(False, "Internal server error", status_code=500)

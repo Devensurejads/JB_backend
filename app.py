@@ -1,20 +1,27 @@
-# app.py
-
 import os
 from app import create_app
-from flask import send_from_directory
+from flask import send_from_directory, abort
 
 # Create Flask application
 app = create_app(os.getenv('FLASK_ENV', 'development'))
 
-@app.route('/uploads/company_logos/<filename>')
-def uploaded_company_logo(filename):
-    abs_dir = os.path.join(os.getcwd(), 'uploads', 'company_logos')
+# ✅ Generic uploads route for multiple folders (company_logos, resumes, etc.)
+@app.route('/uploads/<folder>/<filename>')
+def uploaded_file(folder, filename):
+    allowed_folders = {'company_logos', 'resumes', 'profile_images'}  # Add more if needed
+    if folder not in allowed_folders:
+        abort(404)  # Security: only serve known folders
+
+    abs_dir = os.path.join(os.getcwd(), 'uploads', folder)
     abs_path = os.path.join(abs_dir, filename)
     print(f"➡️ Trying to serve file: {abs_path}")
+
     if not os.path.exists(abs_path):
         print("🚫 File not found!")
+        abort(404)
+
     return send_from_directory(abs_dir, filename)
+
 if __name__ == '__main__':
     # Run the application
     app.run(

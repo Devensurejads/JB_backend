@@ -1,5 +1,6 @@
 # app/api/v1/jobs/routes.py
 
+
 import logging
 from flask import Blueprint, request, jsonify, g
 from datetime import datetime
@@ -457,7 +458,7 @@ def get_jobs():
 
 
 @jobs_bp.route('/employer/<int:employer_id>', methods=['GET'])
-@login_required
+@employer_required
 def get_employer_jobs(employer_id):
     """Get jobs for a specific employer."""
     try:
@@ -466,9 +467,18 @@ def get_employer_jobs(employer_id):
         print(user)
         if user['role'] == 'employer':
             from app.utils.db_abstraction import db
-            employer_record = db.select('employers', ['id'], 'user_id = ? AND is_active = 1', [user['user_id']])
-            if not employer_record or list(employer_record)[0]['id'] != employer_id:
-                return jsonify({'error': 'Not authorized to view these jobs'}), 403
+            employer_record = db.select(
+                'employers',
+                ['id'],
+                'user_id = ? AND is_active = 1',
+                [user['user_id']]
+            )
+            print("DEBUG employer_record:", employer_record)
+
+            if not employer_record:
+                return jsonify({'error': 'Employer record not found'}), 403
+            employer_id = employer_record[0]['id']
+            
         elif user['role'] not in ['admin', 'superadmin']:
             return jsonify({'error': 'Not authorized to view these jobs'}), 403
         
@@ -497,6 +507,7 @@ def get_employer_jobs(employer_id):
         
         # Get jobs for the employer
         jobs, total_count = JobsService.get_jobs_list(filters, employer_id=employer_id)
+        print(jobs)
         
         # Calculate pagination info
         page = filters.get('page', 1)
@@ -518,6 +529,116 @@ def get_employer_jobs(employer_id):
     except Exception as e:
         logger.error(f"Error retrieving employer jobs: {str(e)}")
         return jsonify({'error': 'Failed to retrieve jobs'}), 500
+
+
+@jobs_bp.route('/overview/<int:job_id>', methods=['GET'])
+def get_job_overview(job_id):
+    """Fetch job overview including job details, skills, top applicants, and remaining applicants with experience."""
+    print(job_id)
+    try:
+        # Get job details from the jobs table (including all necessary columns)
+        job_details = db.select('jobs', 
+                                ['*'], 'id = ?', [job_id])
+        print(job_details)
+        if not job_details:
+            return jsonify({'error': 'Job not found'}), 404
+
+        job = job_details[0]  # Extract job details
+        job_title = job['title']
+        job_company_name = job['company_name']
+        job_salary_min = job['salary_min']
+        job_salary_max = job['salary_max']
+        job_location = job['location']
+        job_description = job['description']
+        job_skills = job['required_skills']  # Skills are now part of the 'jobs' table
+        job_employment_type = job['employment_type']
+        job_company_logo = job['company_logo_path']
+        job_responsibilities = job['responsibilities']
+        
+        # If skills are stored as a string, we need to parse them (assuming they are comma-separated)
+        if isinstance(job_skills, str):
+            skills = job_skills.split(',')  # Convert comma-separated string into a list
+        else:
+            skills = job_skills  # If it's already a list (or JSON), use it directly
+
+        # Get all applicants for this job (order by experience, descending)
+        all_applicants = db.select('job_applications', ['user_id'], 'job_id = ?', [job_id])
+
+        if not all_applicants:
+            return jsonify({'error': 'No applicants found'}), 404
+
+        # Now join with the users table to fetch the first name, last name, and experience of each applicant
+        applicants_with_experience = []
+        for applicant in all_applicants:
+            user_id = applicant['user_id']
+            # Fetch the first name, last name from the users table
+            user = db.select('users', ['*'], 'id = ?', [user_id])
+            employee = db.select('employees', ['*'], 'user_id = ?', [user_id])
+            print(employee)
+            print(user)
+            if user:
+                first_name = user[0]['first_name']
+                last_name = user[0]['last_name']
+                id = user[0]['id']
+            else:
+                first_name = last_name = "N/A"  # If no data is found, set as "N/A"
+                
+            if employee:
+                 employee_skills = employee[0]['skills']
+                 profile_image = employee[0]['profile_url']
+                 role = employee[0]['current_position']
+
+            # Fetch the experience of the applicant from the employees table (if experience exists)
+            employee_id = applicant['user_id']
+            employee = db.select('employees', ['experience_years'], 'user_id = ?', [user_id])
+
+            if employee:
+                experience = employee[0]['experience_years']
+            else:
+                experience = "N/A"  # If no experience data is found
+
+            applicants_with_experience.append({
+                'id': id,
+                'name': f"{first_name} {last_name}",
+                'experience': experience,
+                'profile_image': profile_image,
+                'skills': employee_skills,
+                'role': role
+            })
+
+        # If there are 5 or fewer applicants, make all applicants the top applicants
+        if len(applicants_with_experience) <= 5:
+            top_applicants = applicants_with_experience
+            remaining_applicants = []
+        else:
+            # Top 5 applicants (sorted by experience)
+            top_applicants = applicants_with_experience[:5]
+            # Remaining applicants (all except the first 5)
+            remaining_applicants = applicants_with_experience[5:]
+
+        # Compile the job overview response
+        job_overview = {
+            'title': job_title,
+            'salary_max': job_salary_max,
+            'salary_min': job_salary_min,
+            'location': job_location,
+            'company_name': job_company_name,
+            'description': job_description,
+            'skills': skills,
+            'employment_type': job_employment_type,
+            'top_applicants': top_applicants,
+            'remaining_applicants': remaining_applicants,
+            'company_logo': job_company_logo,
+            'responsibilities': job_responsibilities
+        }
+
+        return jsonify(job_overview), 200
+
+    except Exception as e:
+        logger.error(f"Error fetching job overview for job {job_id}: {str(e)}")
+        return jsonify({'error': 'Failed to fetch job overview'}), 500
+
+
 
 
 # Job Statistics

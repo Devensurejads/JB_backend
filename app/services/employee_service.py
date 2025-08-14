@@ -165,7 +165,6 @@ class EmployeeService:
                 JOIN users u ON e.user_id = u.id
                 WHERE e.id = ?
             """
-            
             result = db.execute_raw_query(query, [employee_id])
             
             if not result:
@@ -248,6 +247,18 @@ class EmployeeService:
             
             # Prepare update data with proper date handling
             update_data = {}
+
+            user_update_data = {}
+            if 'first_name' in validated_data:
+                user_update_data['first_name'] = validated_data.pop('first_name')
+            if 'last_name' in validated_data:
+                user_update_data['last_name'] = validated_data.pop('last_name')
+
+            if user_update_data:
+                success = db.update('users', user_update_data, 'id = ?', [current_user_id])
+                if not success:
+                    return False, "Failed to update user details", None
+
             for key, value in validated_data.items():
                 if key in ['date_of_birth', 'available_from']:
                     update_data[key] = safe_isoformat(value)

@@ -569,6 +569,7 @@ class JobListResponseSchema(Schema):
     views_count = fields.Int(dump_only=True)
     posted_at = fields.Str(dump_only=True)
     expires_at = fields.Str()
+    employment_type = fields.Str()
     
     # Company Logo Fields
     company_logo_filename = fields.Str(dump_only=True)

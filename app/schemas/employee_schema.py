@@ -1,6 +1,6 @@
 # app/schemas/employee_schema.py
 
-from marshmallow import Schema, fields, validate, validates, ValidationError, post_load
+from marshmallow import Schema, fields, validate, validates, ValidationError, post_load, pre_load, post_dump
 from datetime import datetime, date
 import re
 import json
@@ -109,6 +109,8 @@ class EmployeeUpdateSchema(Schema):
     """Schema for employee profile updates."""
     
     # Personal Information
+    first_name = fields.Str(validate=validate.Length(min=1, max=100))
+    last_name = fields.Str(validate=validate.Length(min=1, max=100))
     date_of_birth = fields.Str(allow_none=True)
     gender = fields.Str(
         validate=validate.OneOf(['male', 'female', 'other', 'prefer_not_to_say'])
@@ -117,6 +119,7 @@ class EmployeeUpdateSchema(Schema):
     
     # Address Information
     address = fields.Str(validate=validate.Length(max=255))
+    office_address = fields.Str(validate=validate.Length(max=255))
     city = fields.Str(validate=validate.Length(max=100))
     state = fields.Str(validate=validate.Length(max=100))
     country = fields.Str(validate=validate.Length(max=100))
@@ -126,7 +129,11 @@ class EmployeeUpdateSchema(Schema):
     current_position = fields.Str(validate=validate.Length(max=255))
     current_company = fields.Str(validate=validate.Length(max=255))
     experience_years = fields.Int(validate=validate.Range(min=0, max=50))
-    
+    qualification = fields.Str(validate=validate.Length(max=255))
+    bio = fields.Str(validate=validate.Length(max=255))  
+    resume_url = fields.Str(validate=validate.Length(max=255), allow_none=True)
+    profile_url = fields.Str(validate=validate.Length(max=255), allow_none=True)
+    skills = fields.Str(validate=validate.Length(max=1000), allow_none=True)
     # Profile URLs
     linkedin_url = fields.Url(allow_none=True)
     github_url = fields.Url(allow_none=True)
@@ -301,6 +308,9 @@ class EmployeeResponseSchema(Schema):
     portfolio_url = fields.Url()
     linkedin_url = fields.Url()
     github_url = fields.Url()
+    qualification = fields.Str()
+    office_address = fields.Str()
+    profile_url = fields.Url()
     
     # Job Preferences
     preferred_job_type = fields.Str()
@@ -310,6 +320,7 @@ class EmployeeResponseSchema(Schema):
     preferred_salary_max = fields.Decimal(places=2)
     preferred_currency = fields.Str()
     remote_work_preference = fields.Str()
+    skills = fields.Str()
     
     # Availability
     availability_status = fields.Str()
