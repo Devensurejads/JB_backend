@@ -8,6 +8,7 @@ import json
 class JobCategorySchema(Schema):
     """Schema for job category validation."""
     
+    id = fields.Int(dump_only=True)
     name = fields.Str(
         required=True,
         validate=validate.Length(min=2, max=100, error="Category name must be between 2 and 100 characters")
@@ -357,6 +358,7 @@ class JobFilterSchema(Schema):
     
     # Category and Type filters
     category_id = fields.Int(validate=validate.Range(min=1))
+    category_name = fields.Str(dump_only=True)
     employment_type = fields.List(fields.Str(
         validate=validate.OneOf(['full-time', 'part-time', 'contract', 'freelance', 'internship'])
     ))
@@ -410,6 +412,13 @@ class JobFilterSchema(Schema):
     # Pagination
     page = fields.Int(validate=validate.Range(min=1))
     per_page = fields.Int(validate=validate.Range(min=1, max=100))
+    
+    date_posted = fields.List(fields.Str(
+        validate=validate.OneOf(['last_hour', 'last_24_hour', 'last_7_days', 'last_14_days', 'last_30_days'])
+    ))
+    
+    min_salary = fields.Float(missing=None)  # or fields.Int() if you prefer integers
+    max_salary = fields.Float(missing=None)  # or fields.Int() if you prefer integers
     
     # Sorting
     sort_by = fields.Str(
@@ -500,6 +509,8 @@ class JobResponseSchema(Schema):
     company_overview = fields.Str()
     work_environment = fields.Str()
     growth_opportunities = fields.Str()
+    company_name = fields.Str()
+    requirements = fields.Str()
     
     # SEO and Visibility
     seo_title = fields.Str()
@@ -511,6 +522,8 @@ class JobResponseSchema(Schema):
     approved_by = fields.Int(dump_only=True)
     approved_at = fields.Str(dump_only=True)
     rejection_reason = fields.Str(dump_only=True)
+    
+    company_logo_path = fields.Str(dump_only=True)
     
     # Scheduling
     start_date = fields.Date()
@@ -570,6 +583,11 @@ class JobListResponseSchema(Schema):
     posted_at = fields.Str(dump_only=True)
     expires_at = fields.Str()
     employment_type = fields.Str()
+    requirements = fields.Str(validate=validate.Length(max=5000))
+    benefits = fields.Str(validate=validate.Length(max=5000))
+    pincode = fields.Int(dump_only=True)
+    latitude = fields.Float(dump_only=True)
+    longitude = fields.Float(dump_only=True)
     
     # Company Logo Fields
     company_logo_filename = fields.Str(dump_only=True)

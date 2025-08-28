@@ -5,6 +5,10 @@ import json
 from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from decimal import Decimal
+import math
+from marshmallow import ValidationError
+
+
 
 # Database imports with fallback
 try:
@@ -698,6 +702,371 @@ class JobsService:
             logger.error(f"Error retrieving jobs list: {str(e)}")
             raise
     
+    
+    @staticmethod
+    def get_jobs_list_filter(filters: Dict = None, employer_id: int = None) -> Tuple[List[Dict], int]:
+        """
+        Get a paginated list of jobs with filtering (simplified version).
+        
+        Args:
+            filters: Filter parameters
+            employer_id: ID of employer (to filter by employer)
+            
+        Returns:
+            Tuple of (job_list, total_count)
+        """
+        try:
+            # Validate filters, but handle salary fields and pincode separately if not in schema
+            if filters:
+                try:
+                    filters = job_filter_schema.load(filters)
+                except ValidationError as e:
+                    # If salary fields or pincode are causing validation errors, extract them separately
+                    special_filters = {}
+                    clean_filters = filters.copy()
+                    
+                    # Extract fields that might not be in schema
+                    for field in ['min_salary', 'max_salary', 'pincode']:
+                        if field in clean_filters:
+                            try:
+                                if field in ['min_salary', 'max_salary']:
+                                    special_filters[field] = float(clean_filters.pop(field))
+                                else:  # pincode
+                                    special_filters[field] = int(clean_filters.pop(field))
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    # Validate remaining filters
+                    filters = job_filter_schema.load(clean_filters)
+                    # Add back special filters
+                    filters.update(special_filters)
+            else:
+                filters = job_filter_schema.load({})
+            
+            # Handle pincode-based location filtering
+            location_filter_jobs = None
+            if filters.get('pincode'):
+                user_pincode = filters['pincode']
+                logger.info(f"Applying pincode filter for: {user_pincode}")
+                
+                # First, get the coordinates for the user's pincode
+                user_coords = JobsService.get_coordinates_for_pincode(user_pincode)
+                
+                if user_coords:
+                    user_lat, user_lng = user_coords
+                    logger.info(f"User coordinates: {user_lat}, {user_lng}")
+                    
+                    # Get all jobs with coordinates to calculate distances
+                    all_jobs_query = """
+                        SELECT id, latitude, longitude, pincode 
+                        FROM jobs 
+                        WHERE latitude IS NOT NULL 
+                        AND longitude IS NOT NULL 
+                        AND is_active = 1
+                    """
+                    all_jobs = db.execute_query(all_jobs_query)
+                    
+                    # Filter jobs within 15km radius
+                    nearby_job_ids = []
+                    for job in all_jobs:
+                        if job.get('latitude') and job.get('longitude'):
+                            distance = JobsService.calculate_distance(
+                                user_lat, user_lng, 
+                                float(job['latitude']), float(job['longitude'])
+                            )
+                            logger.debug(f"Job ID {job['id']} at pincode {job.get('pincode')}: distance = {distance:.2f}km")
+                            
+                            if distance <= 15.0:  # Within 15km radius
+                                nearby_job_ids.append(job['id'])
+                    
+                    location_filter_jobs = nearby_job_ids
+                    logger.info(f"Found {len(nearby_job_ids)} jobs within 15km of pincode {user_pincode}")
+                else:
+                    logger.warning(f"Could not find coordinates for pincode: {user_pincode}")
+                    # Return empty result if pincode is invalid
+                    location_filter_jobs = []
+            
+            # Build basic conditions and parameters
+            conditions = ['is_active = 1']
+            params = []
+            
+            # Apply location filter if we have nearby jobs from pincode search
+            if location_filter_jobs is not None:
+                if not location_filter_jobs:
+                    # No jobs found within radius, return empty result
+                    return [], 0
+                else:
+                    # Add condition to only include nearby jobs
+                    placeholders = ','.join(['?' for _ in location_filter_jobs])
+                    conditions.append(f'id IN ({placeholders})')
+                    params.extend(location_filter_jobs)
+            
+            # Employer filter
+            if employer_id:
+                conditions.append('employer_id = ?')
+                params.append(employer_id)
+            
+            # Category filter
+            if filters.get('category_id'):
+                conditions.append('category_id = ?')
+                params.append(filters['category_id'])
+            
+            # Employment type filter (supports multiple values)
+            if filters.get('employment_type'):
+                employment_types = filters['employment_type']
+                if isinstance(employment_types, list) and employment_types:
+                    placeholders = ','.join(['?' for _ in employment_types])
+                    conditions.append(f'employment_type IN ({placeholders})')
+                    params.extend(employment_types)
+                elif isinstance(employment_types, str):
+                    conditions.append('employment_type = ?')
+                    params.append(employment_types)
+            
+            # Experience level filter (supports multiple values)
+            if filters.get('experience_level'):
+                experience_levels = filters['experience_level']
+                if isinstance(experience_levels, list) and experience_levels:
+                    placeholders = ','.join(['?' for _ in experience_levels])
+                    conditions.append(f'experience_level IN ({placeholders})')
+                    params.extend(experience_levels)
+                elif isinstance(experience_levels, str):
+                    conditions.append('experience_level = ?')
+                    params.append(experience_levels)
+            
+            # Date posted filter (supports multiple values)
+            if filters.get('date_posted'):
+                date_ranges = filters['date_posted']
+                if not isinstance(date_ranges, list):
+                    date_ranges = [date_ranges]
+                
+                # Convert date range labels to actual date conditions
+                date_conditions = []
+                for date_range in date_ranges:
+                    if date_range == 'last_hour':
+                        date_conditions.append("created_at >= datetime('now', '-1 hour')")
+                    elif date_range == 'last_24_hour':
+                        date_conditions.append("created_at >= datetime('now', '-1 day')")
+                    elif date_range == 'last_7_days':
+                        date_conditions.append("created_at >= datetime('now', '-7 days')")
+                    elif date_range == 'last_30_days':
+                        date_conditions.append("created_at >= datetime('now', '-30 days')")
+                    elif date_range == 'last_90_days':
+                        date_conditions.append("created_at >= datetime('now', '-90 days')")
+                
+                # If we have valid date conditions, combine them with OR
+                if date_conditions:
+                    if len(date_conditions) == 1:
+                        conditions.append(date_conditions[0])
+                    else:
+                        conditions.append(f"({' OR '.join(date_conditions)})")
+            
+            # Salary filters
+            if filters.get('min_salary') and filters.get('max_salary'):
+                min_salary_value = float(filters['min_salary']) if hasattr(filters['min_salary'], '__float__') else filters['min_salary']
+                max_salary_value = float(filters['max_salary']) if hasattr(filters['max_salary'], '__float__') else filters['max_salary']
+                
+                logger.info(f"Applying salary filter: {min_salary_value} <= salary_min <= {max_salary_value}")
+                
+                conditions.append('(salary_min >= ? AND salary_min <= ?)')
+                params.extend([min_salary_value, max_salary_value])
+                
+            elif filters.get('min_salary'):
+                min_salary_value = float(filters['min_salary']) if hasattr(filters['min_salary'], '__float__') else filters['min_salary']
+                logger.info(f"Applying min salary filter: salary_min >= {min_salary_value}")
+                conditions.append('salary_min >= ?')
+                params.append(min_salary_value)
+                
+            elif filters.get('max_salary'):
+                max_salary_value = float(filters['max_salary']) if hasattr(filters['max_salary'], '__float__') else filters['max_salary']
+                logger.info(f"Applying max salary filter: salary_min <= {max_salary_value}")
+                conditions.append('salary_min <= ?')
+                params.append(max_salary_value)
+            else:
+                logger.info("No salary filters applied")
+            
+            # Status filter - default to active
+            status_filter = filters.get('status', ['active'])
+            if status_filter:
+                if isinstance(status_filter, list):
+                    placeholders = ','.join(['?' for _ in status_filter])
+                    conditions.append(f'status IN ({placeholders})')
+                    params.extend(status_filter)
+                else:
+                    conditions.append('status = ?')
+                    params.append(status_filter)
+            
+            # Basic search filter
+            if filters.get('search'):
+                conditions.append('(title LIKE ? OR company_name LIKE ?)')
+                search_term = f"%{filters['search']}%"
+                params.extend([search_term, search_term])
+            
+            # Build WHERE clause
+            where_clause = ' AND '.join(conditions)
+            
+            # Get total count with simplified query
+            count_query = f"SELECT COUNT(*) FROM jobs WHERE {where_clause}"
+            try:
+                count_result = db.execute_query(count_query, params, fetch_one=True)
+                if isinstance(count_result, dict):
+                    total_count = count_result.get('COUNT(*)', 0) or list(count_result.values())[0]
+                else:
+                    total_count = count_result[0] if count_result else 0
+            except Exception as e:
+                logger.error(f"Count query failed: {str(e)}")
+                total_count = 0
+            
+            # Get jobs with basic query
+            page = filters.get('page', 1)
+            per_page = filters.get('per_page', 20)
+            offset = (page - 1) * per_page
+            
+            # Add sorting
+            sort_by = filters.get('sort_by', 'created_at')
+            sort_order = filters.get('sort_order', 'desc')
+            
+            # Map sort fields to actual column names
+            sort_mapping = {
+                'created_at': 'created_at',
+                'posted_at': 'posted_at',
+                'title': 'title',
+                'salary_min': 'salary_min',
+                'salary_max': 'salary_max'
+            }
+            
+            sort_column = sort_mapping.get(sort_by, 'created_at')
+            jobs_query = f"""
+                SELECT * FROM jobs 
+                WHERE {where_clause} 
+                ORDER BY {sort_column} {sort_order.upper()} 
+                LIMIT {per_page} OFFSET {offset}
+            """
+            
+            jobs = db.execute_query(jobs_query, params)
+            
+            # Process jobs and add employer/category info individually
+            jobs_list = []
+            for job in jobs:
+                if hasattr(job, '_asdict'):
+                    job_dict = job._asdict()
+                elif hasattr(job, 'keys'):
+                    job_dict = dict(job)
+                else:
+                    job_dict = job
+                
+                # Parse JSON fields
+                json_fields = ['required_skills', 'preferred_skills', 'languages', 'keywords']
+                for field in json_fields:
+                    if job_dict.get(field):
+                        try:
+                            job_dict[field] = json.loads(job_dict[field])
+                        except (json.JSONDecodeError, TypeError):
+                            job_dict[field] = []
+                    else:
+                        job_dict[field] = []
+                
+                # Add distance if pincode filter was applied
+                if filters.get('pincode') and user_coords and job_dict.get('latitude') and job_dict.get('longitude'):
+                    distance = JobsService.calculate_distance(
+                        user_coords[0], user_coords[1],
+                        float(job_dict['latitude']), float(job_dict['longitude'])
+                    )
+                    job_dict['distance_km'] = round(distance, 2)
+                
+                try:
+                    if job_dict.get('category_id'):
+                        category = db.get_by_id('job_categories', job_dict['category_id'])
+                        if category:
+                            if hasattr(category, '_asdict'):
+                                category_dict = category._asdict()
+                            elif hasattr(category, 'keys'):
+                                category_dict = dict(category)
+                            else:
+                                category_dict = category
+                            
+                            job_dict['category_name'] = category_dict.get('name')
+                        else:
+                            job_dict['category_name'] = None
+                    else:
+                        job_dict['category_name'] = None
+                except Exception as e:
+                    logger.warning(f"Could not fetch category for job {job_dict.get('id')}: {str(e)}")
+                    job_dict['category_name'] = None
+                
+                jobs_list.append(job_list_response_schema.dump(job_dict))
+            
+            return jobs_list, total_count
+            
+        except Exception as e:
+            logger.error(f"Error retrieving jobs list: {str(e)}")
+            # Return empty results instead of raising exception
+            return [], 0
+
+    @staticmethod
+    def get_coordinates_for_pincode(pincode: int) -> Optional[Tuple[float, float]]:
+        """
+        Get latitude and longitude coordinates for a given pincode.
+        First checks if we have a job with this pincode in the database,
+        otherwise you can integrate with a geocoding service.
+        
+        Args:
+            pincode: The pincode to get coordinates for
+            
+        Returns:
+            Tuple of (latitude, longitude) or None if not found
+        """
+        try:
+            # First, try to find coordinates from existing jobs with this pincode
+            query = """
+                SELECT latitude, longitude 
+                FROM jobs 
+                WHERE pincode = ? 
+                AND latitude IS NOT NULL 
+                AND longitude IS NOT NULL 
+                LIMIT 1
+            """
+            result = db.execute_query(query, [pincode], fetch_one=True)
+            
+            if result:
+                return (float(result['latitude']), float(result['longitude']))
+            
+            # TODO: If no existing job found, you can integrate with a geocoding service
+            # For example, Google Maps Geocoding API or any other service
+            # For now, returning None if not found in database
+            logger.warning(f"No coordinates found for pincode: {pincode}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting coordinates for pincode {pincode}: {str(e)}")
+            return None
+
+    @staticmethod
+    def calculate_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+        """
+        Calculate the great circle distance between two points on earth using Haversine formula.
+        
+        Args:
+            lat1, lng1: Latitude and longitude of first point
+            lat2, lng2: Latitude and longitude of second point
+            
+        Returns:
+            Distance in kilometers
+        """
+        # Convert latitude and longitude from degrees to radians
+        lat1, lng1, lat2, lng2 = map(math.radians, [lat1, lng1, lat2, lng2])
+        print(f"lat1: {lat1}, lng1: {lng1}, lat2: {lat2}, lng2: {lng2}")
+        # Haversine formula
+        dlat = lat2 - lat1
+        dlng = lng2 - lng1
+        a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng/2)**2
+        c = 2 * math.asin(math.sqrt(a))
+        
+        # Radius of earth in kilometers
+        r = 6371
+        
+        return c * r
+        
+        
     @staticmethod
     def get_job_statistics(job_id: int, employer_id: int = None) -> Dict:
         """

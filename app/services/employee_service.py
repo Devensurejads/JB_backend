@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 from marshmallow import ValidationError
 import json
 
+from app.utils.email import EmailService
 from app.utils.db_abstraction import db
 from app.utils.password_utils import hash_password
 from app.utils.date_utils import safe_isoformat
@@ -26,7 +27,7 @@ class EmployeeService:
     """Service class for employee management operations."""
     
     @staticmethod
-    def create_employee(data: Dict, current_user_id: int = None, ip_address: str = None) -> Tuple[bool, str, Optional[Dict]]:
+    def create_employee(data: Dict, current_user_id: int = None, ip_address: str = None, email_service: EmailService = None, base_url: str = None, verification_token: str = None) -> Tuple[bool, str, Optional[Dict]]:
         """
         Create a new employee account.
         
@@ -62,6 +63,9 @@ class EmployeeService:
                 return False, "Password hashing failed", None
             
             # Prepare user data
+            verification_token = EmailService.generate_verification_token()
+            token_expiry = EmailService.get_token_expiry_time(24)  # 24 hours
+            
             user_data = {
                 'username': validated_data['username'],
                 'password_hash': password_hash,
@@ -69,13 +73,26 @@ class EmployeeService:
                 'first_name': validated_data['first_name'],
                 'last_name': validated_data['last_name'],
                 'role': 'employee',
-                'is_active': True,
+                'is_active': False,
+                'email_verification_token': verification_token,
+                'email_verification_token_expires': token_expiry,
                 'created_at': datetime.utcnow().isoformat(),
                 'updated_at': datetime.utcnow().isoformat()
             }
             
             # Create user account
             user_id = db.insert('users', user_data)
+            
+            try:
+                email_sent = email_service.send_verification_email(
+                    to_email=validated_data['email'],
+                    username=validated_data['username'],
+                    verification_token=verification_token,
+                    base_url=base_url
+                )
+                logger.info(f"Email sent: {email_sent}")
+            except Exception as e:
+                logger.error(f"Email sending failed: {e}")
             if not user_id:
                 return False, "Failed to create user account", None
             
@@ -180,23 +197,132 @@ class EmployeeService:
         except Exception as e:
             logger.error(f"Error getting employee {employee_id}: {str(e)}")
             return False, "Internal server error", None
+        
+    @staticmethod
+    def get_all_employees(page: int = 1, per_page: int = 10, search_term: str = "", experience: Optional[int] = None) -> Tuple[bool, str, Optional[Dict]]:
+        """
+        Get all employees with pagination and optional filters:
+        - searchTerm: first_name, last_name, current_position
+        - experience: experience_years
+        """
+        try:
+            offset = (page - 1) * per_page
+
+            # Base query
+            base_query = """
+                FROM employees e
+                JOIN users u ON e.user_id = u.id
+                WHERE 1=1
+            """
+            params = []
+
+            # Search filter
+            if search_term:
+                search_like = f"%{search_term.lower()}%"
+                base_query += """
+                    AND (
+                        LOWER(u.first_name) LIKE ?
+                        OR LOWER(u.last_name) LIKE ?
+                        OR LOWER(e.current_position) LIKE ?
+                    )
+                """
+                params.extend([search_like, search_like, search_like])
+
+            # Experience filter
+            if experience is not None:
+                base_query += " AND e.experience_years = ?"
+                params.append(experience)
+
+            # Count total
+            count_query = f"SELECT COUNT(*) as total {base_query}"
+            count_result = db.execute_raw_query(count_query, params)
+            total_count = count_result[0]['total'] if count_result else 0
+            total_pages = (total_count + per_page - 1) // per_page
+
+
+            # Get paginated employees
+            query = f"""
+                SELECT e.*, u.username, u.email, u.first_name, u.last_name, u.role,
+                    u.is_active as user_is_active, u.created_at as user_created_at
+                {base_query}
+                ORDER BY e.created_at DESC
+                LIMIT ? OFFSET ?
+            """
+            employees = db.execute_raw_query(query, params + [per_page, offset])
+
+            employee_list = []
+
+            for emp in employees:
+                emp_id = emp['id']
+
+                # Education
+                education_query = """
+                    SELECT id, institution_name, degree_type, degree_title, field_of_study,
+                        start_date, end_date, is_current, gpa, description, created_at
+                    FROM employee_education
+                    WHERE employee_id = ?
+                    ORDER BY start_date DESC
+                """
+                education_result = db.execute_raw_query(education_query, [emp_id])
+
+                # Experience
+                experience_query = """
+                    SELECT *
+                    FROM employee_work_experience
+                    WHERE employee_id = ?
+                    ORDER BY start_date DESC
+                """
+                experience_result = db.execute_raw_query(experience_query, [emp_id])
+
+                emp['education'] = education_result or []
+                emp['experience'] = experience_result or []
+
+                try:
+                    serialized_data = employee_response_schema.dump(emp)
+                except Exception as e:
+                    logger.warning(f"Schema serialization failed for emp {emp_id}, returning raw dict. Error: {e}")
+                    serialized_data = emp
+
+                employee_list.append(serialized_data)
+
+            # Final response
+            response = {
+                'employees': employee_list,
+                'pagination': {
+                    'page': page,
+                    'per_page': per_page,
+                    'total': total_count,
+                    'total_pages': total_pages,
+                    'has_next': page < total_pages,
+                    'has_prev': page > 1
+                }
+            }
+
+            return True, "Employees retrieved successfully", response
+
+        except Exception as e:
+            logger.error(f"Error getting all employees: {str(e)}")
+            return False, "Internal server error", None
+
+
+
     
     @staticmethod
     def get_employee_by_user_id(user_id: int) -> Tuple[bool, str, Optional[Dict]]:
         """
-        Get employee by user ID.
+        Get employee by user ID with education list.
         
         Args:
             user_id (int): User ID
             
         Returns:
-            Tuple[bool, str, Optional[Dict]]: (success, message, employee_data)
+            Tuple[bool, str, Optional[Dict]]: (success, message, employee_data_with_education)
         """
         try:
             # Get employee with user data using JOIN
             query = """
                 SELECT e.*, u.username, u.email, u.first_name, u.last_name, u.role,
-                       u.is_active as user_is_active, u.created_at as user_created_at
+                    u.is_active as user_is_active, u.created_at as user_created_at
                 FROM employees e
                 JOIN users u ON e.user_id = u.id
                 WHERE e.user_id = ?
@@ -208,15 +334,45 @@ class EmployeeService:
                 return False, "Employee not found", None
             
             employee_data = result[0]
+
+            # Get employee education list
+            education_query = """
+                SELECT id, institution_name, degree_type, degree_title, field_of_study,
+                    start_date, end_date, is_current, gpa, description, created_at
+                FROM employee_education
+                WHERE employee_id = ?
+                ORDER BY start_date DESC
+            """
             
-            # Serialize with schema
-            serialized_data = employee_response_schema.dump(employee_data)
+            experience_query = """
+                SELECT *
+                FROM employee_work_experience
+                WHERE employee_id = ?
+                ORDER BY start_date DESC
+            """
+            
+            experience_result = db.execute_raw_query(experience_query, [employee_data['id']])
+            print(experience_result)
+            
+            education_result = db.execute_raw_query(education_query, [employee_data['id']])
+
+            # Attach education list to the employee data
+            employee_data['education'] = education_result or []
+            employee_data['experience'] = experience_result or []
+
+            # Serialize with schema (if your schema supports nested education)
+            try:
+                serialized_data = employee_response_schema.dump(employee_data)
+            except Exception as e:
+                logger.warning(f"Schema serialization failed, returning raw dict. Error: {e}")
+                serialized_data = employee_data
             
             return True, "Employee retrieved successfully", serialized_data
             
         except Exception as e:
             logger.error(f"Error getting employee by user ID {user_id}: {str(e)}")
             return False, "Internal server error", None
+
     
     @staticmethod
     def update_employee(employee_id: int, data: Dict, current_user_id: int, ip_address: str = None) -> Tuple[bool, str, Optional[Dict]]:
@@ -944,6 +1100,102 @@ class EmployeeService:
         except Exception as e:
             logger.error(f"Error getting education for employee {employee_id}: {str(e)}")
             return False, "Internal server error", None
+        
+    @staticmethod
+    def update_education(employee_id: int, education_id: int, education_data: Dict, current_user_id: int, ip_address: str = None) -> Tuple[bool, str, Optional[Dict]]:
+        """Update education record for an employee."""
+        try:
+            # Validate request data
+            try:
+                validated_data = employee_education_schema.load(education_data, partial=True)  # partial=True for partial updates
+            except ValidationError as e:
+                return False, f"Validation error: {e.messages}", None
+
+            # Check employee exists
+            if not db.get_by_id('employees', employee_id):
+                return False, "Employee not found", None
+
+            # Check education record exists and belongs to the employee
+            existing_education = db.get_by_id('employee_education', education_id)
+            if not existing_education or existing_education.get('employee_id') != employee_id:
+                return False, "Education record not found", None
+
+            # Convert dates safely
+            if 'start_date' in validated_data:
+                validated_data['start_date'] = safe_isoformat(validated_data.get('start_date'))
+            if 'end_date' in validated_data:
+                validated_data['end_date'] = safe_isoformat(validated_data.get('end_date'))
+
+            # Convert GPA if present
+            if 'gpa' in validated_data and validated_data['gpa']:
+                validated_data['gpa'] = float(validated_data['gpa'])
+
+            # Update record
+            updated = db.update('employee_education', validated_data, 'id = ?', [education_id])
+            if not updated:
+                return False, "Failed to update education", None
+
+            # Recalculate profile completion
+            completion_percentage = EmployeeService._calculate_profile_completion(employee_id)
+            db.update('employees', {'profile_completion': completion_percentage}, 'id = ?', [employee_id])
+
+            # Log audit
+            db.log_audit(
+                user_id=current_user_id,
+                action='UPDATE',
+                entity_type='employee_education',
+                entity_id=education_id,
+                changes=validated_data,
+                ip_address=ip_address
+            )
+
+            # Get updated record
+            updated_record = db.get_by_id('employee_education', education_id)
+
+            return True, "Education updated successfully", updated_record
+
+        except Exception as e:
+            logger.error(f"Error updating education for employee {employee_id}: {str(e)}")
+            return False, "Internal server error", None
+
+    @staticmethod
+    def delete_education(employee_id: int, education_id: int, current_user_id: int, ip_address: str = None) -> Tuple[bool, str]:
+        """Delete education from employee profile."""
+        try:
+            # Check if employee exists
+            if not db.get_by_id('employees', employee_id):
+                return False, "Employee not found"
+
+            # Check if education entry exists for that employee
+            education = db.get_by_id('employee_education', education_id)
+            if not education or education.get('employee_id') != employee_id:
+                return False, "Education record not found"
+
+            # Perform delete
+            deleted = db.delete('employee_education', 'id = ?', [education_id])
+            if not deleted:
+                return False, "Failed to delete education"
+
+            # Update profile completion
+            completion_percentage = EmployeeService._calculate_profile_completion(employee_id)
+            db.update('employees', {'profile_completion': completion_percentage}, 'id = ?', [employee_id])
+
+            # Log audit trail
+            db.log_audit(
+                user_id=current_user_id,
+                action='DELETE',
+                entity_type='employee_education',
+                entity_id=education_id,
+                changes={'education_deleted': education.get('institution_name')},
+                ip_address=ip_address
+            )
+
+            return True, "Education deleted successfully"
+
+        except Exception as e:
+            logger.error(f"Error deleting education for employee {employee_id}: {str(e)}")
+            return False, "Internal server error"
+
     
     # Work Experience Management Methods
     @staticmethod
@@ -1006,6 +1258,97 @@ class EmployeeService:
         except Exception as e:
             logger.error(f"Error getting work experience for employee {employee_id}: {str(e)}")
             return False, "Internal server error", None
+        
+    @staticmethod
+    def update_work_experience(employee_id: int, experience_id: int, experience_data: Dict, current_user_id: int, ip_address: str = None) -> Tuple[bool, str, Optional[Dict]]:
+        """Update work experience for employee."""
+        try:
+            # Validate input
+            try:
+                validated_data = employee_work_experience_schema.load(experience_data, partial=True)
+            except ValidationError as e:
+                return False, f"Validation error: {e.messages}", None
+
+            # Check if employee exists
+            if not db.get_by_id('employees', employee_id):
+                return False, "Employee not found", None
+
+            # Check if experience exists
+            existing_experience = db.get_by_id('employee_work_experience', experience_id)
+            if not existing_experience or existing_experience['employee_id'] != employee_id:
+                return False, "Work experience not found", None
+
+            # Prepare updated data
+            update_data = validated_data.copy()
+            update_data['start_date'] = safe_isoformat(update_data.get('start_date'))
+            update_data['end_date'] = safe_isoformat(update_data.get('end_date'))
+
+            # Update experience
+            success = db.update('employee_work_experience', update_data, 'id = ?', [experience_id])
+            if not success:
+                return False, "Failed to update work experience", None
+
+            # Update profile completion
+            completion_percentage = EmployeeService._calculate_profile_completion(employee_id)
+            db.update('employees', {'profile_completion': completion_percentage}, 'id = ?', [employee_id])
+
+            # Log audit trail
+            db.log_audit(
+                user_id=current_user_id,
+                action='UPDATE',
+                entity_type='employee_work_experience',
+                entity_id=experience_id,
+                changes=update_data,
+                ip_address=ip_address
+            )
+
+            # Return updated experience
+            updated_experience = db.get_by_id('employee_work_experience', experience_id)
+            return True, "Work experience updated successfully", updated_experience
+
+        except Exception as e:
+            logger.error(f"Error updating work experience for employee {employee_id}: {str(e)}")
+            return False, "Internal server error", None
+        
+    @staticmethod
+    def delete_work_experience(employee_id: int, experience_id: int, current_user_id: int, ip_address: str = None) -> Tuple[bool, str]:
+        """Delete work experience for employee."""
+        try:
+            # Check if employee exists
+            if not db.get_by_id('employees', employee_id):
+                return False, "Employee not found"
+
+            # Check if experience exists
+            experience = db.get_by_id('employee_work_experience', experience_id)
+            if not experience or experience['employee_id'] != employee_id:
+                return False, "Work experience not found"
+
+            # Delete experience
+            success = db.delete('employee_work_experience', 'id = ?', [experience_id])
+            if not success:
+                return False, "Failed to delete work experience"
+
+            # Update profile completion
+            completion_percentage = EmployeeService._calculate_profile_completion(employee_id)
+            db.update('employees', {'profile_completion': completion_percentage}, 'id = ?', [employee_id])
+
+            # Log audit trail
+            db.log_audit(
+                user_id=current_user_id,
+                action='DELETE',
+                entity_type='employee_work_experience',
+                entity_id=experience_id,
+                changes={'experience_deleted': f"{experience.get('position_title')} at {experience.get('company_name')}"},
+                ip_address=ip_address
+            )
+
+            return True, "Work experience deleted successfully"
+
+        except Exception as e:
+            logger.error(f"Error deleting work experience for employee {employee_id}: {str(e)}")
+            return False, "Internal server error"
+
+
     
     # Certification Management Methods
     @staticmethod

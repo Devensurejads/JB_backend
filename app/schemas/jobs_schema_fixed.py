@@ -115,6 +115,9 @@ class JobCreateSchema(Schema):
     remote_type = fields.Str(
         validate=validate.OneOf(['fully_remote', 'hybrid', 'onsite'])
     )
+    pincode = fields.Str(validate=validate.Length(max=10))
+    latitude = fields.Float()
+    longitude = fields.Float() 
     
     # Compensation
     salary_min = fields.Decimal(places=2, validate=validate.Range(min=0))

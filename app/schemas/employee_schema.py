@@ -311,6 +311,7 @@ class EmployeeResponseSchema(Schema):
     qualification = fields.Str()
     office_address = fields.Str()
     profile_url = fields.Url()
+    education = fields.List(fields.Nested(EmployeeEducationSchema), dump_only=True)
     
     # Job Preferences
     preferred_job_type = fields.Str()

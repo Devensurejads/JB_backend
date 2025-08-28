@@ -224,13 +224,15 @@ def create_job():
 
 
 @jobs_bp.route('/<int:job_id>', methods=['GET'])
+@login_required
 def get_job(job_id):
     """Get a specific job by ID."""
     try:
         # Record job view if user is authenticated
-        user_id = None
+        user_data = None
         if hasattr(g, 'current_user') and g.current_user:
-            user_id = g.current_user['id']
+            user_data = g.current_user
+            user_id = user_data.get("user_id")
         
         # Record the view for analytics
         JobsService.record_job_view(
@@ -245,6 +247,26 @@ def get_job(job_id):
         if not job:
             return jsonify({'error': 'Job not found'}), 404
         
+        if user_id:
+            query = """
+                SELECT *
+                FROM job_applications 
+                WHERE user_id = ? AND job_id = ?
+            """
+            application = db.execute_raw_query(query, [user_id, job_id])
+            applied = bool(application)
+            
+        if user_id:
+            save_query = """
+                SELECT *
+                FROM saved_jobs 
+                WHERE user_id = ? AND job_id = ?
+            """
+            saveJobs = db.execute_raw_query(save_query, [user_id, job_id])
+            saved = bool(saveJobs)
+
+        job['applied'] = applied
+        job['saved'] = saved
         return jsonify({'job': job})
         
     except Exception as e:
@@ -346,55 +368,55 @@ def delete_job(job_id):
 
 @jobs_bp.route('/', methods=['GET'])
 def get_jobs():
-    """Get a paginated list of jobs with filtering, plus saved flag if user is logged in."""
+    """Get a paginated list of jobs with search filtering, plus saved flag if user is logged in."""
     try:
         # Get filter parameters from query string
         filters = dict(request.args)
         
-        # Handle list parameters (convert comma-separated strings to lists)
-        list_params = ['employment_type', 'experience_level', 'education_level', 
-                      'remote_type', 'status', 'priority', 'skills']
-        for param in list_params:
-            if param in filters and filters[param]:
-                filters[param] = [item.strip() for item in filters[param].split(',')]
+        # Debug: Print received parameters
+        logger.info(f"Received filters: {filters}")
         
-        # Convert boolean parameters
-        bool_params = ['is_remote', 'is_featured', 'is_urgent', 'accepting_applications', 'employer_verified']
-        for param in bool_params:
-            if param in filters:
-                filters[param] = filters[param].lower() in ['true', '1', 'yes']
+        # Updated frontend mapping to include all filter parameters
+        frontend_mapping = {
+            'search': 'search',
+            'category_id': 'category_id',
+            'employment_type': 'employment_type',
+            'experience_level': 'experience_level',
+            'date_posted': 'date_posted',
+            'min_salary': 'min_salary',
+            'max_salary': 'max_salary',
+            'pincode': 'pincode',  # Added pincode mapping
+        }
         
-        # Convert date parameters
-        date_params = ['posted_after', 'posted_before', 'expires_after', 'expires_before']
-        for param in date_params:
-            if param in filters and filters[param]:
-                try:
-                    from datetime import datetime
-                    filters[param] = datetime.fromisoformat(filters[param]).date()
-                except ValueError:
-                    return jsonify({'error': f'Invalid date format for {param}'}), 400
+        # Process all filter parameters
+        processed_filters = {}
+        for frontend_key, backend_key in frontend_mapping.items():
+            if frontend_key in filters and filters[frontend_key]:
+                # Handle employment_type, experience_level, and date_posted specially to support multiple values
+                if frontend_key in ['employment_type', 'experience_level', 'date_posted']:
+                    # Split comma-separated values or handle single value
+                    if isinstance(filters[frontend_key], str):
+                        values = [val.strip() for val in filters[frontend_key].split(',')]
+                        processed_filters[backend_key] = values
+                    else:
+                        processed_filters[backend_key] = filters[frontend_key]
+                else:
+                    processed_filters[backend_key] = filters[frontend_key]
         
-        # Convert numeric parameters
-        numeric_params = ['category_id', 'employer_id', 'page', 'per_page']
+        # Handle pagination parameters and salary filters
+        numeric_params = ['page', 'per_page', 'category_id', 'min_salary', 'max_salary', 'pincode']  # Added pincode
         for param in numeric_params:
             if param in filters and filters[param]:
                 try:
-                    filters[param] = int(filters[param])
+                    # Convert to float for salary params to handle decimals, int for others
+                    if param in ['min_salary', 'max_salary']:
+                        processed_filters[param] = float(filters[param])
+                    else:
+                        processed_filters[param] = int(filters[param])
                 except ValueError:
                     return jsonify({'error': f'Invalid numeric value for {param}'}), 400
         
-        # Convert decimal parameters
-        decimal_params = ['salary_min', 'salary_max']
-        for param in decimal_params:
-            if param in filters and filters[param]:
-                try:
-                    from decimal import Decimal
-                    filters[param] = Decimal(filters[param])
-                except (ValueError, TypeError):
-                    return jsonify({'error': f'Invalid decimal value for {param}'}), 400
-
-        # ✅ Get current user if authenticated
-        
+        # Get current user if authenticated
         auth_header = request.headers.get('Authorization', None)
         g.current_user = None
 
@@ -415,23 +437,23 @@ def get_jobs():
         user_id = None
         if hasattr(g, 'current_user') and g.current_user:
             user_id = g.current_user.get('user_id')
-        # ✅ Get jobs
-        jobs, total_count = JobsService.get_jobs_list(filters)
+        
+        # Get jobs with processed filters
+        jobs, total_count = JobsService.get_jobs_list_filter(processed_filters)
 
-        # ✅ If logged in, get saved jobs for this user
+        # If logged in, get saved jobs for this user
         saved_job_ids = []
         if user_id:
             rows = db.select('saved_jobs', ['job_id'], 'user_id = ?', [user_id])
-            print(rows)
             saved_job_ids = [row['job_id'] for row in rows]
 
-        # ✅ Add saved flag to each job
+        # Add saved flag to each job
         for job in jobs:
             job['saved'] = job['id'] in saved_job_ids
 
         # Calculate pagination info
-        page = filters.get('page', 1)
-        per_page = filters.get('per_page', 20)
+        page = processed_filters.get('page', 1)
+        per_page = processed_filters.get('per_page', 20)
         total_pages = (total_count + per_page - 1) // per_page
 
         return jsonify({
@@ -539,18 +561,19 @@ def get_job_overview(job_id):
         # Get job details from the jobs table (including all necessary columns)
         job_details = db.select('jobs', 
                                 ['*'], 'id = ?', [job_id])
-        print(job_details)
         if not job_details:
             return jsonify({'error': 'Job not found'}), 404
 
         job = job_details[0]  # Extract job details
+        skills_records = db.select('job_skills', ['skill_name'], 'job_id = ?', [job_id])
+        
+        job_skills = [s['skill_name'] for s in skills_records]
         job_title = job['title']
         job_company_name = job['company_name']
         job_salary_min = job['salary_min']
         job_salary_max = job['salary_max']
         job_location = job['location']
         job_description = job['description']
-        job_skills = job['required_skills']  # Skills are now part of the 'jobs' table
         job_employment_type = job['employment_type']
         job_company_logo = job['company_logo_path']
         job_responsibilities = job['responsibilities']
@@ -564,8 +587,8 @@ def get_job_overview(job_id):
         # Get all applicants for this job (order by experience, descending)
         all_applicants = db.select('job_applications', ['user_id'], 'job_id = ?', [job_id])
 
-        if not all_applicants:
-            return jsonify({'error': 'No applicants found'}), 404
+        # if not all_applicants:
+        #     return jsonify({'error': 'No applicants found'}), 404
 
         # Now join with the users table to fetch the first name, last name, and experience of each applicant
         applicants_with_experience = []
@@ -1062,18 +1085,36 @@ def apply_job():
 @jobs_bp.route('/applications', methods=['GET'])
 @login_required
 def list_job_applications():
-    """List job applications for the current user"""
+    """List job applications for the current user with pagination"""
     try:
         user = g.current_user
         user_id = user['user_id']
         role = user['role']
         
+        # Get pagination parameters from query string
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 10, type=int)
+        
+        # Validate pagination parameters
+        if page < 1:
+            page = 1
+        if per_page < 1 or per_page > 100:  # Limit max per_page to prevent abuse
+            per_page = 10
+        
+        # Calculate offset for pagination
+        offset = (page - 1) * per_page
 
         if role == 'employee':
-            # 1. Get applications by this user
-            applications = db.select('job_applications', '*', 'user_id = ?', [user_id])
+            # 1. Get all applications by this user
+            all_applications = db.select('job_applications', '*', 'user_id = ?', [user_id])
             
-            # 2. For each application, get the related job details
+            # Get total count from the actual results
+            total_count = len(all_applications) if all_applications else 0
+            
+            # 2. Apply pagination in Python
+            applications = all_applications[offset:offset + per_page] if all_applications else []
+            
+            # 3. For each application, get the related job details
             applications_with_jobs = []
             for app in applications:
                 job = db.select(
@@ -1096,7 +1137,7 @@ def list_job_applications():
                 )
                 job_data = job[0] if job else None
 
-                # 3. Attach job details to application
+                # Attach job details to application
                 applications_with_jobs.append({
                     **app,
                     'job': job_data
@@ -1112,15 +1153,58 @@ def list_job_applications():
             employer_id = employer[0]['id']
             employer_jobs = db.select('jobs', ['id'], 'employer_id = ?', [employer_id])
             job_ids = [job['id'] for job in employer_jobs]
-            if not job_ids:
-                return jsonify([])
             
+            if not job_ids:
+                return jsonify({
+                    'jobs': [],
+                    'pagination': {
+                        'has_next': False,
+                        'has_prev': False,
+                        'page': page,
+                        'per_page': per_page,
+                        'total_count': 0,
+                        'total_pages': 0
+                    }
+                })
+            
+            # Get all applications for employer's jobs first
             placeholders = ', '.join(['?'] * len(job_ids))
             query = f"job_id IN ({placeholders})"
-            applications = db.select('job_applications', '*', query, job_ids)
+            all_applications = db.select('job_applications', '*', query, job_ids)
+            
+            total_count = len(all_applications) if all_applications else 0
+            
+            # Apply pagination in Python
+            applications = all_applications[offset:offset + per_page] if all_applications else []
         else:
             return jsonify({'error': 'Unauthorized'}), 403
-        return jsonify({'jobs': applications})
+        
+        # Get total count for pagination calculation
+        if role == 'employee':
+            # For employee, we already have total_count from the COUNT query
+            pass
+        elif role in ['employer']:
+            # For employer, we already calculated total_count above
+            pass
+        
+        # Calculate pagination info
+        total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 0
+        has_next = page < total_pages
+        has_prev = page > 1
+        
+        pagination_info = {
+            'has_next': has_next,
+            'has_prev': has_prev,
+            'page': page,
+            'per_page': per_page,
+            'total_count': total_count,
+            'total_pages': total_pages
+        }
+        
+        return jsonify({
+            'jobs': applications,
+            'pagination': pagination_info
+        })
     
     except Exception as e:
         logger.error(f"Error fetching job applications: {str(e)}")
@@ -1151,9 +1235,9 @@ def list_job_applications_by_job_id(job_id):
 
 
 @jobs_bp.route('/save', methods=['POST'])
-@employee_required  # Ensures that only employees can save jobs
+@employee_required  # Ensures that only employees can save/unsave jobs
 def save_job():
-    """Save a job for the current employee"""
+    """Toggle save/unsave a job for the current employee"""
     try:
         # Get job save data from the request
         data = request.get_json()
@@ -1169,27 +1253,36 @@ def save_job():
         if not job:
             return jsonify({'error': 'Job not found'}), 404
 
-        # Check if the user has already saved the job
+        # Check if the job is already saved
         existing_saved_job = db.select('saved_jobs', ['id'], 'user_id = ? AND job_id = ?', [user_id, job_id])
-        if existing_saved_job:
-            return jsonify({'error': 'You have already saved this job'}), 400
-        
-        # Insert the saved job entry into the saved_jobs table
-        saved_job_data = {
-            'user_id': user_id,
-            'job_id': job_id,
-        }
-        db.insert('saved_jobs', saved_job_data)
 
-        return jsonify({
-            'message': 'Job saved successfully',
-            'user_id': user_id,
-            'job_id': job_id
-        }), 201
+        if existing_saved_job:
+            # If exists → unsave (delete from saved_jobs)
+            db.delete('saved_jobs', 'user_id = ? AND job_id = ?', [user_id, job_id])
+            return jsonify({
+                'message': 'Job unsaved successfully',
+                'user_id': user_id,
+                'job_id': job_id,
+                'saved': False
+            }), 200
+        else:
+            # If not exists → save job
+            saved_job_data = {
+                'user_id': user_id,
+                'job_id': job_id,
+            }
+            db.insert('saved_jobs', saved_job_data)
+            return jsonify({
+                'message': 'Job saved successfully',
+                'user_id': user_id,
+                'job_id': job_id,
+                'saved': True
+            }), 201
 
     except Exception as e:
-        logger.error(f"Error saving job: {str(e)}")
-        return jsonify({'error': 'Failed to save job'}), 500
+        logger.error(f"Error toggling saved job: {str(e)}")
+        return jsonify({'error': 'Failed to process save/unsave job'}), 500
+
 
 
 
@@ -1197,27 +1290,62 @@ def save_job():
 @jobs_bp.route('/saved/<int:user_id>', methods=['GET'])
 @employee_required  # Ensures that only employees can view saved jobs
 def get_saved_jobs(user_id):
-    """Get all saved jobs for a specific employee"""
+    """Get all saved jobs for a specific employee with pagination"""
     try:
-       
         user = g.current_user
         if user['user_id'] != user_id and user['role'] != 'admin':
             return jsonify({'error': 'Unauthorized'}), 403
 
-        # Fetch saved jobs for the employee (user_id)
-        saved_jobs = db.select('saved_jobs', '*', 'user_id = ?', [user_id])
+        # Get pagination parameters from query string
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 10, type=int)
+        
+        # Validate pagination parameters
+        if page < 1:
+            page = 1
+        if per_page < 1 or per_page > 100:  # Limit per_page to prevent abuse
+            per_page = 10
+
+        # Calculate offset for pagination
+        offset = (page - 1) * per_page
+
+        # Fetch all saved jobs for the employee first
+        all_saved_jobs = db.select('saved_jobs', '*', 'user_id = ?', [user_id])
+        
+        # Get total count
+        total_count = len(all_saved_jobs) if all_saved_jobs else 0
 
         # Check if there are any saved jobs
-        if not saved_jobs:
-            return jsonify({'message': 'No saved jobs found for this employee'}), 404
+        if total_count == 0:
+            return jsonify({
+                'message': 'No saved jobs found for this employee',
+                'jobs': [],
+                'pagination': {
+                    'has_next': False,
+                    'has_prev': False,
+                    'page': page,
+                    'per_page': per_page,
+                    'total_count': 0,
+                    'total_pages': 0
+                }
+            }), 200
+
+        # Sort by created_at descending (most recent first)
+        all_saved_jobs.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        # Apply pagination by slicing the results
+        saved_jobs = all_saved_jobs[offset:offset + per_page]
 
         # Fetch job details for each saved job
         saved_jobs_with_details = []
         for saved_job in saved_jobs:
             # Get job details like title and description for each saved job
-            job = db.select('jobs', ['id', 'title', 'description', 'company_name', 'company_logo_path', 'posted_at', 'remote_type', 'salary_max', 'salary_min', 'employment_type'], 'id = ?', [saved_job['job_id']])
-            print(job)
-            print(saved_job)
+            job = db.select('jobs', [
+                'id', 'title', 'description', 'company_name', 
+                'company_logo_path', 'posted_at', 'remote_type', 
+                'salary_max', 'salary_min', 'employment_type'
+            ], 'id = ?', [saved_job['job_id']])
+            
             if job:
                 saved_jobs_with_details.append({
                     'saved_job_id': saved_job['id'],
@@ -1233,7 +1361,23 @@ def get_saved_jobs(user_id):
                     'employment_type': job[0]['employment_type'],
                     'saved_at': saved_job['created_at']
                 })
-        return jsonify({'jobs': saved_jobs_with_details})
+
+        # Calculate pagination metadata
+        total_pages = (total_count + per_page - 1) // per_page  # Ceiling division
+        has_next = page < total_pages
+        has_prev = page > 1
+
+        return jsonify({
+            'jobs': saved_jobs_with_details,
+            'pagination': {
+                'has_next': has_next,
+                'has_prev': has_prev,
+                'page': page,
+                'per_page': per_page,
+                'total_count': total_count,
+                'total_pages': total_pages
+            }
+        })
 
     except Exception as e:
         logger.error(f"Error fetching saved jobs for employee {user_id}: {str(e)}")

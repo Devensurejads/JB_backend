@@ -2,6 +2,7 @@
 -- Jobs Management Tables
 
 -- Job Categories Table (for organizing jobs)
+
 CREATE TABLE IF NOT EXISTS job_categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -44,6 +45,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     country TEXT,
     is_remote BOOLEAN DEFAULT FALSE,
     remote_type TEXT, -- 'fully_remote', 'hybrid', 'onsite'
+    pincode INTEGER,
+    latitude DECIMAL(10, 6),
+    longitude DECIMAL(10, 6),
     
     -- Compensation
     salary_min DECIMAL(10, 2),

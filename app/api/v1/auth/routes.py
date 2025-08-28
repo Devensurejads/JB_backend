@@ -151,6 +151,32 @@ def login():
         logger.error(f"User login error: {str(e)}")
         return create_error_response("Login failed", 500)
 
+@auth_bp.route('/verify-email/<token>', methods=['GET'])
+def verify_email(token):
+    """
+    Verify user email using verification token.
+    
+    Args:
+        token (str): Email verification token
+        
+    Returns:
+        JSON response with verification status
+    """
+    try:
+        
+        # Verify email token
+        success, message, user_data = auth_service.verify_email_token(token)
+        
+        if success:
+            logger.info(f"Email verification successful for user: {user_data.get('username') if user_data else 'unknown'}")
+            return create_response(message, user_data, 200)
+        else:
+            logger.warning(f"Email verification failed: {message}")
+            return create_response(message, 400)
+    
+    except Exception as e:
+        logger.error(f"Email verification error: {str(e)}")
+        return create_response("Email verification failed", 500)
 
 @auth_bp.route('/profile', methods=['GET'])
 @login_required
@@ -223,35 +249,37 @@ def update_profile():
 def change_password():
     """
     Change user password.
-    
-    Returns:
-        JSON response with password change status
     """
     try:
-        # Get request data
         data = request.get_json()
         if not data:
             return create_error_response("No data provided", 400)
-        
+
+        old_password = data.get("old_password")
+        new_password = data.get("new_password")
+
+        if not old_password or not new_password:
+            return create_error_response("Old and new password are required", 400)
+
         user_id = request.current_user['user_id']
         ip_address = get_client_ip()
-        
-        # Change password
-        success, message = AuthService.change_password(user_id, data, ip_address)
-        
+
+        success, message = AuthService.change_password(user_id, old_password, new_password, ip_address)
+
         if success:
             logger.info(f"Password changed for user: {user_id}")
             return create_success_response(message)
         else:
             return create_error_response(message, 400)
-    
+
     except ValidationError as e:
         logger.warning(f"Password change validation error: {e.messages}")
         return create_error_response("Validation failed", 400, e.messages)
-    
+
     except Exception as e:
         logger.error(f"Password change error: {str(e)}")
         return create_error_response("Password change failed", 500)
+
 
 
 @auth_bp.route('/users', methods=['GET'])

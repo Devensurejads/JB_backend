@@ -1,5 +1,6 @@
 -- Add to app/models/schema.sql
 -- Employers Table - extends user functionality for employer-specific data
+
 CREATE TABLE IF NOT EXISTS employers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL UNIQUE,
@@ -14,12 +15,15 @@ CREATE TABLE IF NOT EXISTS employers (
     state TEXT,
     country TEXT,
     zip_code TEXT,
+    profile_url TEXT,
     logo_url TEXT,
     linkedin_company_url TEXT,
     founded_year INTEGER,
     company_type TEXT DEFAULT 'private', -- 'private', 'public', 'nonprofit', 'government'
     registration_number TEXT,
     tax_id TEXT,
+    location TEXT,
+    headquarters TEXT,
     
     -- Employer-specific settings
     is_verified BOOLEAN DEFAULT FALSE,
@@ -29,7 +33,7 @@ CREATE TABLE IF NOT EXISTS employers (
     subscription_expires_at TIMESTAMP,
     
     -- Job posting limits based on subscription
-    monthly_job_limit INTEGER DEFAULT 5,
+    monthly_job_limit INTEGER DEFAULT 20,
     jobs_posted_this_month INTEGER DEFAULT 0,
     
     -- Contact person details (if different from user)
@@ -49,7 +53,10 @@ CREATE TABLE IF NOT EXISTS employers (
     notes TEXT, -- Internal admin notes
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
+
+    email_verification_token TEXT,
+    email_verification_token_expires TEXT,
+
     -- Foreign Keys
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (verified_by) REFERENCES users(id) ON DELETE SET NULL,
@@ -63,6 +70,7 @@ CREATE TABLE IF NOT EXISTS employers (
     CHECK (jobs_posted_this_month >= 0),
     CHECK (LENGTH(company_name) >= 2)
 );
+CREATE INDEX IF NOT EXISTS idx_users_verification_token ON users(email_verification_token);
 
 -- Employer Documents Table (for storing verification documents)
 CREATE TABLE IF NOT EXISTS employer_documents (

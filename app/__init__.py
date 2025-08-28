@@ -31,7 +31,7 @@ def create_app(config_name='development'):
     app.config['DATABASE_PATH'] = os.environ.get('DATABASE_PATH', 'job_management.db')
     
     # Initialize CORS
-    CORS(app, origins=['http://localhost:3000', 'http://127.0.0.1:3000'])
+    CORS(app, origins=['http://localhost:4200', 'http://127.0.0.1:4200'])
     
     # Initialize database
     try:

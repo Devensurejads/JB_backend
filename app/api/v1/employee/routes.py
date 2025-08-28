@@ -11,7 +11,20 @@ from app.utils.auth import (
     get_current_user, can_access_user_data
 )
 from app.services.employee_service import employee_service
+from app.utils.db_abstraction import db
+from app.utils.email import EmailService
 
+
+email_service = EmailService(
+    smtp_server="smtp.gmail.com",  # e.g., "smtp.gmail.com"
+    smtp_port=587,  # Usually 587 for TLS
+    smtp_username="devensurejads@gmail.com",
+    smtp_password="sqohkreztwpnjket",
+    from_email="devensurejads@gmail.com"
+)
+
+# Base URL for your application
+BASE_URL = "http://localhost:4200" 
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -63,7 +76,9 @@ def create_employee():
         success, message, employee_data = employee_service.create_employee(
             data=data,
             current_user_id=None,  # Public registration
-            ip_address=ip_address
+            ip_address=ip_address,
+            email_service=email_service,
+            base_url=BASE_URL
         )
         
         if success:
@@ -502,60 +517,40 @@ def get_my_stats():
 @employee_bp.route('/search', methods=['GET'])
 def search_employees():
     """
-    Search employees (public endpoint with limited data).
+    Get all employees with pagination + filters (first_name, last_name, current_position, experience_years).
     ---
-    Public endpoint for searching employees.
+    Accessible by: Employees only.
     """
     try:
-        # Get query parameters
-        filters = request.args.to_dict()
-        
-        # Force public and verified employees only for public search
-        filters['is_active'] = True
-        filters['profile_visibility'] = 'public'
-        
-        # Convert parameters as needed
-        bool_fields = ['is_verified', 'is_active', 'willing_to_relocate']
-        for field in bool_fields:
-            if field in filters:
-                filters[field] = filters[field] if isinstance(filters[field], bool) else filters[field].lower() in ['true', '1', 'yes']
-        
-        numeric_fields = ['page', 'per_page', 'experience_years_min', 'experience_years_max']
-        for field in numeric_fields:
-            if field in filters:
-                try:
-                    filters[field] = int(filters[field])
-                except ValueError:
-                    return create_response(False, f"Invalid {field} parameter", status_code=400)
-        
-        # Limit per_page for public endpoint
-        if filters.get('per_page', 20) > 50:
-            filters['per_page'] = 50
-        
-        # Handle skills array
-        if 'skills' in filters:
-            if isinstance(filters['skills'], str):
-                filters['skills'] = [skill.strip() for skill in filters['skills'].split(',')]
-        
-        # Search employees
-        success, message, result_data = employee_service.list_employees(filters)
-        
+        # Pagination params (support both `per_page` and `perPage`)
+        page = int(request.args.get('page', 1))
+        per_page = request.args.get('per_page') or request.args.get('perPage') or 10
+        per_page = int(per_page)
+
+        # Search term
+        search_term = request.args.get('searchTerm', '').strip()
+
+        # Experience filter
+        experience = request.args.get('experience', '').strip()
+        experience = int(experience) if experience.isdigit() else None
+
+        # Call service
+        success, message, response_data = employee_service.get_all_employees(
+            page, per_page, search_term, experience
+        )
+
         if success:
-            # Filter out sensitive data for public endpoint
-            if 'employees' in result_data:
-                for employee in result_data['employees']:
-                    # Remove sensitive fields for public search
-                    sensitive_fields = ['email', 'username']
-                    for field in sensitive_fields:
-                        employee.pop(field, None)
-            
-            return create_response(True, message, result_data)
+            return create_response(True, message, response_data)
         else:
-            return create_response(False, message, status_code=400)
-    
+            return create_response(False, message, status_code=404 if "not found" in message.lower() else 400)
+
     except Exception as e:
         logger.error(f"Error in search_employees endpoint: {str(e)}")
         return create_response(False, "Internal server error", status_code=500)
+
+
+
+
 
 
 # Skills Management Endpoints
@@ -720,6 +715,71 @@ def get_education(employee_id):
     except Exception as e:
         logger.error(f"Error in get_education endpoint: {str(e)}")
         return create_response(False, "Internal server error", status_code=500)
+    
+    
+@employee_bp.route('/<int:employee_id>/education/<int:education_id>', methods=['PUT'])
+@login_required
+def update_education(employee_id, education_id):
+    """Update an existing education entry for an employee."""
+    try:
+        current_user = get_current_user()
+
+        # Permission check
+        if not _can_manage_employee_data(current_user, employee_id):
+            return create_response(False, "Access denied", status_code=403)
+
+        data = request.get_json()
+        if not data:
+            return create_response(False, "No data provided", status_code=400)
+
+        ip_address = get_client_ip()
+        success, message, updated_data = employee_service.update_education(
+            employee_id=employee_id,
+            education_id=education_id,
+            education_data=data,
+            current_user_id=current_user.get('user_id'),
+            ip_address=ip_address
+        )
+
+        if success:
+            return create_response(True, message, updated_data, status_code=200)
+        else:
+            return create_response(False, message, status_code=400)
+
+    except Exception as e:
+        logger.error(f"Error in update_education endpoint: {str(e)}")
+        return create_response(False, "Internal server error", status_code=500)
+
+    
+    
+@employee_bp.route('/<int:employee_id>/education/<int:education_id>', methods=['DELETE'])
+@login_required
+def delete_education(employee_id, education_id):
+    """Delete education from employee profile."""
+    try:
+        current_user = get_current_user()
+
+        # Check if current user can manage this employee's data
+        if not _can_manage_employee_data(current_user, employee_id):
+            return create_response(False, "Access denied", status_code=403)
+
+        ip_address = get_client_ip()
+        success, message = employee_service.delete_education(
+            employee_id=employee_id,
+            education_id=education_id,
+            current_user_id=current_user.get('user_id'),
+            ip_address=ip_address
+        )
+
+        if success:
+            return create_response(True, message, status_code=200)
+        else:
+            return create_response(False, message, status_code=400)
+
+    except Exception as e:
+        logger.error(f"Error in delete_education endpoint: {str(e)}")
+        return create_response(False, "Internal server error", status_code=500)
+
 
 
 # Work Experience Management Endpoints
@@ -774,6 +834,67 @@ def get_work_experience(employee_id):
     
     except Exception as e:
         logger.error(f"Error in get_work_experience endpoint: {str(e)}")
+        return create_response(False, "Internal server error", status_code=500)
+    
+@employee_bp.route('/<int:employee_id>/experience/<int:experience_id>', methods=['PUT'])
+@login_required
+def update_work_experience(employee_id, experience_id):
+    """Update work experience of an employee."""
+    try:
+        current_user = get_current_user()
+
+        # Permission check
+        if not _can_manage_employee_data(current_user, employee_id):
+            return create_response(False, "Access denied", status_code=403)
+
+        data = request.get_json()
+        if not data:
+            return create_response(False, "No data provided", status_code=400)
+
+        ip_address = get_client_ip()
+        success, message, updated_experience = employee_service.update_work_experience(
+            employee_id=employee_id,
+            experience_id=experience_id,
+            experience_data=data,
+            current_user_id=current_user.get('user_id'),
+            ip_address=ip_address
+        )
+
+        if success:
+            return create_response(True, message, updated_experience)
+        else:
+            return create_response(False, message, status_code=400)
+
+    except Exception as e:
+        logger.error(f"Error in update_work_experience endpoint: {str(e)}")
+        return create_response(False, "Internal server error", status_code=500)
+
+@employee_bp.route('/<int:employee_id>/experience/<int:experience_id>', methods=['DELETE'])
+@login_required
+def delete_work_experience(employee_id, experience_id):
+    """Delete work experience of an employee."""
+    try:
+        current_user = get_current_user()
+
+        # Permission check
+        if not _can_manage_employee_data(current_user, employee_id):
+            return create_response(False, "Access denied", status_code=403)
+
+        ip_address = get_client_ip()
+        success, message = employee_service.delete_work_experience(
+            employee_id=employee_id,
+            experience_id=experience_id,
+            current_user_id=current_user.get('user_id'),
+            ip_address=ip_address
+        )
+
+        if success:
+            return create_response(True, message)
+        else:
+            return create_response(False, message, status_code=400)
+
+    except Exception as e:
+        logger.error(f"Error in delete_work_experience endpoint: {str(e)}")
         return create_response(False, "Internal server error", status_code=500)
 
 

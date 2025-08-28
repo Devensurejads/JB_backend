@@ -68,6 +68,9 @@ CREATE TABLE IF NOT EXISTS employees (
     notes TEXT, -- Internal admin notes
     created_at TEXT,
     updated_at TEXT,
+
+    email_verification_token TEXT,
+    email_verification_token_expires TEXT,
     
     -- Foreign Keys
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -85,6 +88,8 @@ CREATE TABLE IF NOT EXISTS employees (
     CHECK (preferred_salary_max >= preferred_salary_min OR preferred_salary_max IS NULL),
     CHECK (profile_completion >= 0 AND profile_completion <= 100)
 );
+
+CREATE INDEX IF NOT EXISTS idx_users_verification_token ON users(email_verification_token);
 
 -- Employee Skills Table (for structured skill management)
 CREATE TABLE IF NOT EXISTS employee_skills (

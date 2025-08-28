@@ -151,20 +151,23 @@ class AuthService:
             username = validated_data['username']
             password = validated_data['password']
             
-            # Get user from database
-            user = db.select(
-                'users', 
-                condition='username = ? AND is_active = ?', 
-                params=[username, True]
-            )
+            query = """
+                SELECT *
+                FROM users 
+                WHERE username = ?
+            """
+            users = db.execute_raw_query(query, [username])
             
-            if not user:
+            if not users:  # No user found
                 logger.warning(f"Login attempt with invalid username: {username}")
-                # Don't reveal whether username exists
                 return False, "Invalid username or password", None
-            
-            user_data = user[0]
-            stored_hash = user_data.get('password_hash')
+
+            user = users[0]
+
+            if not user.get("is_active"):
+                return False, "Please verify your account.", None
+
+            stored_hash = user.get('password_hash')
             
             if not stored_hash:
                 logger.error(f"No password hash found for user: {username}")
@@ -180,10 +183,10 @@ class AuthService:
                 logger.warning(f"Invalid password for user: {username}")
                 # Log failed login attempt
                 db.log_audit(
-                    user_id=user_data.get('id'),
+                    user_id=user.get('id'),
                     action='LOGIN_FAILED',
                     entity_type='user',
-                    entity_id=user_data.get('id'),
+                    entity_id=user.get('id'),
                     changes={'reason': 'invalid_password'},
                     ip_address=ip_address
                 )
@@ -194,36 +197,59 @@ class AuthService:
                 'users',
                 {'last_login': datetime.utcnow().isoformat()},
                 'id = ?',
-                [user_data.get('id')]
+                [user.get('id')]
             )
             
             # Generate JWT token
             try:
-                token = generate_token(user_data)
+                token = generate_token(user)
             except Exception as e:
                 logger.error(f"Token generation failed: {str(e)}")
                 return False, "Authentication failed", None
             
             # Log successful login
             db.log_audit(
-                user_id=user_data.get('id'),
+                user_id=user.get('id'),
                 action='LOGIN',
                 entity_type='user',
-                entity_id=user_data.get('id'),
+                entity_id=user.get('id'),
                 changes={'login_time': datetime.utcnow().isoformat()},
                 ip_address=ip_address
             )
+            
+            # -------------------------
+            # Fetch role-specific data
+            # -------------------------
+            profile_completed = False
+            profile_data = {}
+            
+            if user.get('role') == "employee":
+                employee_query = "SELECT * FROM employees WHERE user_id = ?"
+                employees = db.execute_raw_query(employee_query, [user.get('id')])
+                if employees:
+                    profile_data = employees[0]
+                    print(profile_data)
+                    if profile_data.get('address'):
+                        profile_completed = True
+
+            elif user.get('role') == "employer":
+                employer_query = "SELECT * FROM employers WHERE user_id = ?"
+                employers = db.execute_raw_query(employer_query, [user.get('id')])
+                if employers:
+                    profile_data = employers[0]
             
             # Prepare response data
             auth_data = {
                 'token': token,
                 'user': {
-                    'id': user_data.get('id'),
-                    'username': user_data.get('username'),
-                    'email': user_data.get('email'),
-                    'first_name': user_data.get('first_name'),
-                    'last_name': user_data.get('last_name'),
-                    'role': user_data.get('role')
+                    'id': user.get('id'),
+                    'username': user.get('username'),
+                    'email': user.get('email'),
+                    'first_name': user.get('first_name'),
+                    'last_name': user.get('last_name'),
+                    'role': user.get('role'),
+                    'profile_url': profile_data.get('profile_url') if profile_data else None,
+                    'profile_completed': profile_completed
                 }
             }
             
@@ -233,6 +259,120 @@ class AuthService:
         except Exception as e:
             logger.error(f"Login error: {str(e)}")
             return False, "Authentication failed", None
+
+        
+    @staticmethod
+    def verify_email_token(token: str) -> Tuple[bool, str, Optional[Dict]]:
+        """
+        Verify email using verification token and activate user account.
+        
+        Args:
+            token (str): Email verification token
+            
+        Returns:
+            Tuple[bool, str, Optional[Dict]]: (success, message, user_data)
+        """
+        try:
+            
+            # Find user by verification token
+            query = """
+                SELECT id, username, password_hash, email, first_name, last_name, 
+                    role, is_active, last_login, created_at, updated_at,
+                    email_verification_token, email_verification_token_expires
+                FROM users 
+                WHERE email_verification_token = ? AND is_active = ?
+            """
+            users = db.execute_raw_query(query, [token, 0])
+            print(f"users: {users}")
+            
+            if not users:
+                logger.warning(f"Invalid or already used verification token: {token[:10]}...")
+                return False, "Invalid or expired verification token", None
+            
+            user = users[0]  # Get the first (and should be only) user
+            
+            if not user:
+                logger.warning(f"Invalid or already used verification token: {token[:10]}...")
+                return False, "Invalid or expired verification token", None
+            
+            # Check if token has expired
+            if user.get('email_verification_token_expires'):
+                try:
+                    expiry_time = datetime.fromisoformat(user['email_verification_token_expires'])
+                    if datetime.utcnow() > expiry_time:
+                        logger.warning(f"Expired verification token for user: {user['username']}")
+                        return False, "Verification token has expired", None
+                except ValueError as e:
+                    logger.error(f"Invalid token expiry format for user {user['id']}: {e}")
+                    return False, "Invalid token expiry format", None
+            
+            # Update user account - activate and clear verification token
+            update_data = {
+                'is_active': 1,  # Use 1 for True in SQLite
+                'email_verification_token': None,
+                'email_verification_token_expires': None,
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            
+            # Update users table
+            user_updated = db.update('users', update_data, 'id = ?', [user['id']])
+            
+            if not user_updated:
+                logger.error(f"Failed to update user verification status for user: {user['id']}")
+                return False, "Failed to verify email", None
+            
+            verification_data = {
+                'is_verified': 1,  # Use 1 for True in SQLite
+                'verification_date': datetime.utcnow().isoformat(),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            
+            # Update employee record - set verification status
+            employee_updated = db.update('employees', verification_data, 'user_id = ?', [user['id']])
+            if not employee_updated:
+                logger.warning(f"Failed to update employee verification status for user: {user['id']}")
+
+            # Update employers table
+            employer_updated = db.update('employers', verification_data, 'user_id = ?', [user['id']])
+            if not employer_updated:
+                logger.warning(f"Failed to update employer verification status for user: {user['id']}")
+            
+            if not employee_updated:
+                logger.warning(f"Failed to update employee verification status for user: {user['id']}")
+            
+            
+            # Log audit trail
+            db.log_audit(
+                user_id=user['id'],
+                action='VERIFY_EMAIL',
+                entity_type='user',
+                entity_id=user['id'],
+                changes={
+                    'email_verified': 1,  # Use 1 for True in SQLite
+                    'is_active': 1,
+                    'verification_token_cleared': 1
+                },
+                ip_address=None
+            )
+            
+            # Prepare user data for response (exclude sensitive information)
+            user_data = {
+                'id': user['id'],
+                'username': user['username'],
+                'email': user['email'],
+                'first_name': user['first_name'],
+                'last_name': user['last_name'],
+                'role': user['role'],
+                'is_active': True,  # Return as boolean for API response
+                'verified_at': datetime.utcnow().isoformat()
+            }
+            
+            logger.info(f"Email verification successful for user: {user['username']} (ID: {user['id']})")
+            return True, "Email verified successfully. Your account is now active.", user_data
+            
+        except Exception as e:
+            logger.error(f"Error in email verification: {str(e)}")
+            return False, "Email verification failed due to server error", None
 
     @staticmethod
     def logout(user_id: int, ip_address: str = None) -> Tuple[bool, str]:

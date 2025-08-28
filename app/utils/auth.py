@@ -76,9 +76,7 @@ def generate_token(user_data: Dict) -> str:
             'user_id': user_data['id'],
             'username': user_data['username'],
             'role': user_data['role'],
-            'exp': datetime.utcnow() + timedelta(
-                seconds=current_app.config.get('JWT_ACCESS_TOKEN_EXPIRES', 3600)
-            ),
+            'exp': datetime.utcnow() + timedelta(days=30),
             'iat': datetime.utcnow()
         }
         

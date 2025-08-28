@@ -5,6 +5,7 @@
 PRAGMA foreign_keys = ON;
 
 -- Users Table (for authentication and user management)
+
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
@@ -19,12 +20,17 @@ CREATE TABLE IF NOT EXISTS users (
     -- updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_at TEXT,
     updated_at TEXT,
+
+    email_verification_token TEXT,
+    email_verification_token_expires TEXT,
     
     -- Constraints
     CHECK (role IN ('superadmin', 'admin', 'staff', 'employee', 'employer')),
     CHECK (LENGTH(username) >= 3),
     CHECK (LENGTH(email) >= 5)
 );
+
+CREATE INDEX IF NOT EXISTS idx_users_verification_token ON users(email_verification_token);
 
 -- User Profiles Table (extended user information)
 CREATE TABLE IF NOT EXISTS user_profiles (

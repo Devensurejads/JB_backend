@@ -96,10 +96,13 @@ class EmployerUpdateSchema(Schema):
     
     # Address Information
     address = fields.Str(validate=validate.Length(max=255))
+    location = fields.Str(validate=validate.Length(max=255))
+    headquarters = fields.Str(validate=validate.Length(max=255))
     city = fields.Str(validate=validate.Length(max=100))
     state = fields.Str(validate=validate.Length(max=100))
     country = fields.Str(validate=validate.Length(max=100))
     zip_code = fields.Str(validate=validate.Length(max=20))
+    profile_url = fields.Str(validate=validate.Length(max=255), allow_none=True)
     
     # Additional Company Details
     linkedin_company_url = fields.Url(allow_none=True)
@@ -151,6 +154,9 @@ class EmployerResponseSchema(Schema):
     website = fields.Url()
     phone = fields.Str()
     logo_url = fields.Url()
+    profile_url = fields.Url()
+    headquarters = fields.Str()
+    location = fields.Str()
     
     # Address Information
     address = fields.Str()
@@ -168,12 +174,12 @@ class EmployerResponseSchema(Schema):
     
     # Verification Status
     is_verified = fields.Bool(dump_only=True)
-    verification_date = fields.DateTime(dump_only=True, format='iso')
+    verification_date = fields.Str(dump_only=True)
     verified_by = fields.Int(dump_only=True)
     
     # Subscription Information
     subscription_plan = fields.Str(dump_only=True)
-    subscription_expires_at = fields.DateTime(dump_only=True, format='iso')
+    subscription_expires_at = fields.Str(dump_only=True)
     monthly_job_limit = fields.Int(dump_only=True)
     jobs_posted_this_month = fields.Int(dump_only=True)
     

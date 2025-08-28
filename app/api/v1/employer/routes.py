@@ -3,12 +3,27 @@
 from flask import Blueprint, request, jsonify, g
 import logging
 from marshmallow import ValidationError
+from werkzeug.utils import secure_filename
+import os
 
 from app.utils.auth import (
     login_required, admin_required, employer_required,
     get_current_user, can_access_user_data
 )
 from app.services.employer_service import employer_service
+from app.utils.db_abstraction import db
+from app.utils.email import EmailService
+
+email_service = EmailService(
+    smtp_server="smtp.gmail.com",  # e.g., "smtp.gmail.com"
+    smtp_port=587,  # Usually 587 for TLS
+    smtp_username="devensurejads@gmail.com",
+    smtp_password="sqohkreztwpnjket",
+    from_email="devensurejads@gmail.com"
+)
+
+# Base URL for your application
+BASE_URL = "http://localhost:4200" 
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -61,7 +76,9 @@ def create_employer():
         success, message, employer_data = employer_service.create_employer(
             data=data,
             current_user_id=None,  # Public registration
-            ip_address=ip_address
+            ip_address=ip_address,
+            email_service=email_service,
+            base_url=BASE_URL
         )
         
         if success:
@@ -239,15 +256,19 @@ def update_employer(employer_id):
 def update_my_profile():
     """
     Update current employer's profile.
-    ---
     Accessible by: Employers only.
     """
     try:
         current_user = get_current_user()
+        print(current_user)
         user_id = current_user.get('user_id')
         
         # Get request data
-        data = request.get_json()
+        data = request.form.to_dict()
+        print(data)
+        profile_image = request.files.get('profile_image')
+        print(profile_image)
+        
         if not data:
             return create_response(False, "No data provided", status_code=400)
         
@@ -261,6 +282,14 @@ def update_my_profile():
         
         # Get IP address for audit logging
         ip_address = get_client_ip()
+        
+        if profile_image:
+            filename = secure_filename(profile_image.filename)
+            upload_folder = 'uploads/profile_images'
+            os.makedirs(upload_folder, exist_ok=True)
+            profile_image_path = os.path.join(upload_folder, filename)
+            profile_image.save(profile_image_path)
+            data['profile_url'] = profile_image_path
         
         # Update employer
         success, message, updated_data = employer_service.update_employer(

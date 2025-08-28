@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from marshmallow import ValidationError
 
+from app.utils.email import EmailService
 from app.utils.db_abstraction import db
 from app.utils.password_utils import hash_password
 from app.schemas.employer_schema import (
@@ -23,7 +24,7 @@ class EmployerService:
     """Service class for employer management operations."""
     
     @staticmethod
-    def create_employer(data: Dict, current_user_id: int = None, ip_address: str = None) -> Tuple[bool, str, Optional[Dict]]:
+    def create_employer(data: Dict, current_user_id: int = None, ip_address: str = None, email_service: EmailService = None, base_url: str = None, verification_token: str = None) -> Tuple[bool, str, Optional[Dict]]:
         """
         Create a new employer account.
         
@@ -58,6 +59,9 @@ class EmployerService:
                 logger.error(f"Password hashing failed: {str(e)}")
                 return False, "Password hashing failed", None
             
+            verification_token = EmailService.generate_verification_token()
+            token_expiry = EmailService.get_token_expiry_time(24)  # 24 hours
+            
             # Prepare user data
             user_data = {
                 'username': validated_data['username'],
@@ -66,13 +70,25 @@ class EmployerService:
                 'first_name': validated_data.get('first_name'),
                 'last_name': validated_data.get('last_name'),
                 'role': 'employer',
-                'is_active': True,
+                'is_active': False,
+                'email_verification_token': verification_token,
+                'email_verification_token_expires': token_expiry,
                 'created_at': datetime.utcnow().isoformat(),
                 'updated_at': datetime.utcnow().isoformat()
             }
             
             # Create user account
             user_id = db.insert('users', user_data)
+            try:
+                email_sent = email_service.send_verification_email(
+                    to_email=validated_data['email'],
+                    username=validated_data['username'],
+                    verification_token=verification_token,
+                    base_url=base_url
+                )
+                logger.info(f"Email sent: {email_sent}")
+            except Exception as e:
+                logger.error(f"Email sending failed: {e}")
             if not user_id:
                 return False, "Failed to create user account", None
             
@@ -189,11 +205,13 @@ class EmployerService:
             """
             
             result = db.execute_raw_query(query, [user_id])
+            print(result)
             
             if not result:
                 return False, "Employer not found", None
             
             employer_data = result[0]
+            print(employer_data)
             
             # Serialize with schema
             serialized_data = employer_response_schema.dump(employer_data)
